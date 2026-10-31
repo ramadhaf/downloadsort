@@ -17,7 +17,7 @@ An incomplete file still being written by a browser or downloader (`*.crdownload
 _Avoid_: Temp file, partial download
 
 **Fansub Release**:
-A video file whose filename encodes a release group tag, series title, and episode number, allowing it to be filed into a show-specific subfolder under the Anime Directory with its original filename preserved.
+A video file whose filename encodes a release group tag, series title, and episode number, allowing it to be filed into a show-specific subfolder under the Anime Directory with its original filename preserved (labeled `"Anime"` in scan reports and GUI tables).
 _Avoid_: Anime clip, raw video
 
 **Desktop Wallpaper**:

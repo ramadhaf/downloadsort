@@ -366,8 +366,8 @@ fn create_tar_gz(archive_path: &Path, base_dir: &Path, items: &[&str]) {
 }
 
 #[test]
-fn extracts_app_tarballs_creates_desktop_and_symlink_trashes_archive_and_skips_non_apps() {
-    let env = TestEnv::new("app_tarball");
+fn extracts_application_archives_creates_desktop_and_symlink_trashes_archive_and_skips_non_apps() {
+    let env = TestEnv::new("app_archive");
     let build_dir = env.root.join("build_tar");
     fs::create_dir_all(&build_dir).unwrap();
 
@@ -527,7 +527,7 @@ fn extracts_app_tarballs_creates_desktop_and_symlink_trashes_archive_and_skips_n
 }
 
 #[test]
-fn detects_elf_without_exec_bit_and_rejects_path_traversal_tarball() {
+fn detects_elf_without_exec_bit_and_rejects_path_traversal_application_archive() {
     let env = TestEnv::new("elf_and_traversal");
     let build_dir = env.root.join("build_tar");
     fs::create_dir_all(&build_dir).unwrap();
@@ -801,24 +801,37 @@ fn session_overrides_save_config_and_structured_json_output() {
     fs::write(env.source.join("square.png"), make_png_header(600, 600)).unwrap();
     fs::write(env.source.join("partial.crdownload"), b"part").unwrap();
     fs::write(env.source.join("notes.txt"), b"txt").unwrap();
+    fs::write(env.source.join("ctrl_\x08_\x0c_\x1b.txt"), b"ctrl").unwrap();
+
+    // Write config.json with a \u005f ('_') escape in the source path to verify hex escape parsing
+    let escaped_source = env
+        .source
+        .display()
+        .to_string()
+        .replacen('_', "\\u005f", 1);
+    let initial_cfg = fs::read_to_string(&env.config_path)
+        .unwrap()
+        .replace(&env.source.display().to_string(), &escaped_source);
+    fs::write(&env.config_path, &initial_cfg).unwrap();
 
     // 1. Dry-run with --json and Session Overrides: must not mutate config.json on disk
     let orig_config = fs::read_to_string(&env.config_path).unwrap();
-    let dry_json = downsort::run_cli([
-        "--config",
-        env.config_path.to_str().unwrap(),
-        "--anime-dir",
-        custom_anime.to_str().unwrap(),
-        "--desktop-wallpapers-dir",
-        custom_desktop.to_str().unwrap(),
-        "--mobile-wallpapers-dir",
-        custom_mobile.to_str().unwrap(),
-        "--apps-dir",
-        custom_apps.to_str().unwrap(),
-        "--dry-run",
-        "--json",
-    ])
-    .expect("dry-run --json should succeed");
+    let dry_json = env
+        .run_cli([
+            "--config",
+            env.config_path.to_str().unwrap(),
+            "--anime-dir",
+            custom_anime.to_str().unwrap(),
+            "--desktop-wallpapers-dir",
+            custom_desktop.to_str().unwrap(),
+            "--mobile-wallpapers-dir",
+            custom_mobile.to_str().unwrap(),
+            "--apps-dir",
+            custom_apps.to_str().unwrap(),
+            "--dry-run",
+            "--json",
+        ])
+        .expect("dry-run --json should succeed");
 
     assert_eq!(
         fs::read_to_string(&env.config_path).unwrap(),
@@ -826,32 +839,42 @@ fn session_overrides_save_config_and_structured_json_output() {
         "Session Overrides must not overwrite saved config.json"
     );
     assert!(dry_json.contains("\"dry_run\": true"), "json: {dry_json}");
-    assert!(dry_json.contains("\"total_scanned\": 5"), "json: {dry_json}");
+    assert!(dry_json.contains("\"total_scanned\": 6"), "json: {dry_json}");
     assert!(dry_json.contains("\"anime_moved\": 1"), "json: {dry_json}");
     assert!(dry_json.contains("\"desktop_wallpapers_moved\": 1"), "json: {dry_json}");
-    assert!(dry_json.contains("\"files_skipped\": 3"), "json: {dry_json}");
+    assert!(dry_json.contains("\"files_skipped\": 4"), "json: {dry_json}");
     assert!(dry_json.contains("\"status\": \"Will Move\""), "json: {dry_json}");
+    assert!(dry_json.contains("\"reason\": \"Ratio 1.78\""), "json: {dry_json}");
     assert!(dry_json.contains("\"reason\": \"Active Download\""), "json: {dry_json}");
     assert!(dry_json.contains("\"reason\": \"Square / Low-Res\""), "json: {dry_json}");
+    assert!(
+        dry_json.contains("\"file\": \"ctrl_\\b_\\f_\\u001b.txt\""),
+        "control characters U+0000..=U+001F must be escaped in JSON output: {dry_json}"
+    );
     assert!(
         dry_json.contains(&custom_anime.display().to_string()),
         "destination should use Session Override anime dir: {dry_json}"
     );
 
     // 2. Live run with Session Overrides and --json
-    let live_json = downsort::run_cli([
-        "--config",
-        env.config_path.to_str().unwrap(),
-        "--anime-dir",
-        custom_anime.to_str().unwrap(),
-        "--desktop-wallpapers-dir",
-        custom_desktop.to_str().unwrap(),
-        "--json",
-    ])
-    .expect("live --json should succeed");
+    let live_json = env
+        .run_cli([
+            "--config",
+            env.config_path.to_str().unwrap(),
+            "--anime-dir",
+            custom_anime.to_str().unwrap(),
+            "--desktop-wallpapers-dir",
+            custom_desktop.to_str().unwrap(),
+            "--json",
+        ])
+        .expect("live --json should succeed");
 
     assert!(live_json.contains("\"dry_run\": false"), "json: {live_json}");
     assert!(live_json.contains("\"status\": \"Moved\""), "json: {live_json}");
+    assert!(
+        live_json.contains("\"reason\": \"Ratio 1.78\""),
+        "live --json wallpaper sorting must set reason to Ratio <ratio>: {live_json}"
+    );
     assert!(custom_anime.join("Dandadan").join(ep).exists());
     assert!(custom_desktop.join("wall.png").exists());
     assert_eq!(
@@ -897,69 +920,87 @@ fn pyqt6_gui_loads_directories_previews_all_files_saves_config_and_sorts_live() 
     let exe = env!("CARGO_BIN_EXE_downsort");
     let orig_config = fs::read_to_string(&env.config_path).unwrap();
 
-    // Drive the PyQt6 MainWindow in offscreen mode through Python
-    let py_driver = r#"
-import os, sys
-os.environ["QT_QPA_PLATFORM"] = "offscreen"
-from PyQt6.QtWidgets import QApplication
-import gui
+    // Drive `downsort --gui` in offscreen mode via a PYTHONPATH sitecustomize.py hook
+    let py_hook_dir = env.root.join("py_hook");
+    fs::create_dir_all(&py_hook_dir).unwrap();
+    let sitecustomize = r#"
+import os, sys, traceback
+from PyQt6.QtCore import QTimer
+from PyQt6.QtWidgets import QApplication, QMainWindow
 
-app = QApplication([])
-cli_bin = sys.argv[1]
-cfg_path = sys.argv[2]
-override_anime = sys.argv[3]
-override_desktop = sys.argv[4]
-orig_cfg_text = open(cfg_path).read()
+_orig_show = QMainWindow.show
 
-win = gui.DownsortWindow(cli_bin=cli_bin, config_path=cfg_path)
+def _hooked_show(win):
+    _orig_show(win)
+    def _drive():
+        try:
+            main_mod = sys.modules["__main__"]
+            assert hasattr(main_mod, "DirectorySpec"), "Expected DirectorySpec dataclass in gui.py"
+            assert all(
+                isinstance(spec, main_mod.DirectorySpec) for spec in main_mod.DIRECTORY_SPECS
+            ), "DIRECTORY_SPECS must contain DirectorySpec instances"
 
-# 1. Verify initial 5 directory inputs loaded from config.json and initial Dry Run Preview populated all 3 files
-assert win.source_input.text().endswith("downloads"), win.source_input.text()
-assert win.anime_input.text().endswith("anime"), win.anime_input.text()
-assert win.desktop_wp_input.text().endswith("desktop_wp"), win.desktop_wp_input.text()
-assert win.mobile_wp_input.text().endswith("mobile_wp"), win.mobile_wp_input.text()
-assert win.apps_input.text().endswith("apps"), win.apps_input.text()
+            cfg_path = os.environ["TEST_CFG_PATH"]
+            override_anime = os.environ["TEST_OVERRIDE_ANIME"]
+            override_desktop = os.environ["TEST_OVERRIDE_DESKTOP"]
+            orig_cfg_text = open(cfg_path).read()
 
-assert win.table.columnCount() == 4
-assert win.table.rowCount() == 3, f"Expected 3 rows in preview table, got {win.table.rowCount()}"
+            # 1. Verify initial 5 directory inputs loaded from config.json and initial Dry Run Preview populated all 3 files
+            assert win.source_input.text().endswith("downloads"), win.source_input.text()
+            assert win.anime_input.text().endswith("anime"), win.anime_input.text()
+            assert win.desktop_wp_input.text().endswith("desktop_wp"), win.desktop_wp_input.text()
+            assert win.mobile_wp_input.text().endswith("mobile_wp"), win.mobile_wp_input.text()
+            assert win.apps_input.text().endswith("apps"), win.apps_input.text()
 
-# 2. Edit anime & desktop wallpaper inputs (Session Override) and click Preview
-win.anime_input.setText(override_anime)
-win.desktop_wp_input.setText(override_desktop)
-win.preview_btn.click()
+            assert win.table.columnCount() == 4
+            assert win.table.rowCount() == 3, f"Expected 3 rows in preview table, got {win.table.rowCount()}"
 
-# Verify config.json on disk is STILL untouched after Session Override preview
-assert open(cfg_path).read() == orig_cfg_text, "Preview must not overwrite config.json"
+            # 2. Edit anime & desktop wallpaper inputs (Session Override) and click Preview
+            win.anime_input.setText(override_anime)
+            win.desktop_wp_input.setText(override_desktop)
+            win.preview_btn.click()
 
-# Verify table destinations reflect the Session Override paths
-destinations = [win.table.item(r, 3).text() for r in range(win.table.rowCount())]
-assert any(override_anime in d for d in destinations), f"Expected {override_anime} in {destinations}"
-assert any(override_desktop in d for d in destinations), f"Expected {override_desktop} in {destinations}"
+            # Verify config.json on disk is STILL untouched after Session Override preview
+            assert open(cfg_path).read() == orig_cfg_text, "Preview must not overwrite config.json"
 
-# 3. Click Sort Now: files should be moved using Session Override paths, config.json still untouched
-win.sort_btn.click()
-assert open(cfg_path).read() == orig_cfg_text, "Sort Now must not overwrite config.json without Save Config"
-assert "Anime: 1" in win.summary_label.text() or "Moved" in win.summary_label.text(), win.summary_label.text()
+            # Verify table destinations reflect the Session Override paths
+            destinations = [win.table.item(r, 3).text() for r in range(win.table.rowCount())]
+            assert any(override_anime in d for d in destinations), f"Expected {override_anime} in {destinations}"
+            assert any(override_desktop in d for d in destinations), f"Expected {override_desktop} in {destinations}"
 
-# 4. Click Save Config: config.json on disk should now persist the new paths
-win.save_config_btn.click()
-saved_cfg = open(cfg_path).read()
-assert override_anime in saved_cfg, saved_cfg
-assert override_desktop in saved_cfg, saved_cfg
-print("GUI_TEST_OK")
+            # 3. Click Sort Now: files should be moved using Session Override paths, config.json still untouched
+            win.sort_btn.click()
+            assert open(cfg_path).read() == orig_cfg_text, "Sort Now must not overwrite config.json without Save Config"
+            assert "Anime: 1" in win.summary_label.text() or "Moved" in win.summary_label.text(), win.summary_label.text()
+
+            # 4. Click Save Config: config.json on disk should now persist the new paths
+            win.save_config_btn.click()
+            saved_cfg = open(cfg_path).read()
+            assert override_anime in saved_cfg, saved_cfg
+            assert override_desktop in saved_cfg, saved_cfg
+            print("GUI_TEST_OK", flush=True)
+            QApplication.instance().quit()
+        except BaseException:
+            traceback.print_exc()
+            os._exit(1)
+
+    QTimer.singleShot(0, _drive)
+
+QMainWindow.show = _hooked_show
 "#;
+    fs::write(py_hook_dir.join("sitecustomize.py"), sitecustomize).unwrap();
 
-    let cmd = std::process::Command::new("python3")
+    let cmd = std::process::Command::new(exe)
+        .env("HOME", &env.root)
+        .env("XDG_DATA_HOME", &env.xdg_data)
         .env("QT_QPA_PLATFORM", "offscreen")
-        .env("PYTHONPATH", concat!(env!("CARGO_MANIFEST_DIR"), "/src"))
-        .arg("-c")
-        .arg(py_driver)
-        .arg(exe)
-        .arg(&env.config_path)
-        .arg(&override_anime)
-        .arg(&override_desktop)
+        .env("PYTHONPATH", &py_hook_dir)
+        .env("TEST_CFG_PATH", &env.config_path)
+        .env("TEST_OVERRIDE_ANIME", &override_anime)
+        .env("TEST_OVERRIDE_DESKTOP", &override_desktop)
+        .args(["--gui", "--config", env.config_path.to_str().unwrap()])
         .output()
-        .expect("python3 should run PyQt6 test");
+        .expect("downsort --gui should run");
 
     let stdout = String::from_utf8_lossy(&cmd.stdout);
     let stderr = String::from_utf8_lossy(&cmd.stderr);

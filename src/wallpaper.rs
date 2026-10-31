@@ -16,6 +16,7 @@ pub enum WallpaperAction {
     Moved {
         category: WallpaperCategory,
         dest: PathBuf,
+        ratio: f64,
     },
     PlannedMove {
         category: WallpaperCategory,
@@ -216,5 +217,9 @@ pub fn handle_wallpaper(
     })?;
     move_file(file_path, &dest)?;
 
-    Ok(WallpaperAction::Moved { category, dest })
+    Ok(WallpaperAction::Moved {
+        category,
+        dest,
+        ratio,
+    })
 }

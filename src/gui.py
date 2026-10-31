@@ -1,4 +1,5 @@
 import argparse
+from dataclasses import dataclass
 import json
 import subprocess
 import sys
@@ -20,25 +21,41 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-DIRECTORY_SPECS = [
-    ("source_input", "source", "--source", "Source Directory:", "~/Downloads"),
-    ("anime_input", "anime", "--anime-dir", "Anime Directory:", "~/Videos/Anime"),
-    (
+
+@dataclass(frozen=True)
+class DirectorySpec:
+    attr_name: str
+    config_key: str
+    cli_flag: str
+    label: str
+    default_path: str
+
+
+DIRECTORY_SPECS: tuple[DirectorySpec, ...] = (
+    DirectorySpec("source_input", "source", "--source", "Source Directory:", "~/Downloads"),
+    DirectorySpec("anime_input", "anime", "--anime-dir", "Anime Directory:", "~/Videos/Anime"),
+    DirectorySpec(
         "desktop_wp_input",
         "desktop_wallpapers",
         "--desktop-wallpapers-dir",
         "Desktop Wallpapers Directory:",
         "~/Pictures/Wallpapers/Desktop",
     ),
-    (
+    DirectorySpec(
         "mobile_wp_input",
         "mobile_wallpapers",
         "--mobile-wallpapers-dir",
         "Mobile Wallpapers Directory:",
         "~/Pictures/Wallpapers/Mobile",
     ),
-    ("apps_input", "applications", "--apps-dir", "Applications Directory:", "~/Applications"),
-]
+    DirectorySpec(
+        "apps_input",
+        "applications",
+        "--apps-dir",
+        "Applications Directory:",
+        "~/Applications",
+    ),
+)
 
 
 class DownsortWindow(QMainWindow):
@@ -65,10 +82,10 @@ class DownsortWindow(QMainWindow):
         grid.setColumnStretch(1, 1)
 
         self._dir_inputs: dict[str, QLineEdit] = {}
-        for row_idx, (attr_name, cfg_key, _flag, label_text, _default) in enumerate(DIRECTORY_SPECS):
-            line_edit, _browse_btn = self._add_dir_row(grid, row_idx, label_text)
-            setattr(self, attr_name, line_edit)
-            self._dir_inputs[cfg_key] = line_edit
+        for row_idx, spec in enumerate(DIRECTORY_SPECS):
+            line_edit, _browse_btn = self._add_dir_row(grid, row_idx, spec.label)
+            setattr(self, spec.attr_name, line_edit)
+            self._dir_inputs[spec.config_key] = line_edit
 
         root_layout.addWidget(dirs_group)
 
@@ -131,10 +148,10 @@ class DownsortWindow(QMainWindow):
 
     def _session_override_args(self) -> list[str]:
         args = self._base_cli_args()
-        for _attr_name, cfg_key, cli_flag, _label, _default in DIRECTORY_SPECS:
-            value = self._dir_inputs[cfg_key].text().strip()
+        for spec in DIRECTORY_SPECS:
+            value = self._dir_inputs[spec.config_key].text().strip()
             if value:
-                args.extend([cli_flag, value])
+                args.extend([spec.cli_flag, value])
         return args
 
     def load_config_into_inputs(self, overrides: dict[str, str]) -> None:
@@ -149,8 +166,10 @@ class DownsortWindow(QMainWindow):
             return
 
         cfg = json.loads(proc.stdout)
-        for _attr_name, cfg_key, _flag, _label, default_val in DIRECTORY_SPECS:
-            self._dir_inputs[cfg_key].setText(overrides.get(cfg_key) or cfg.get(cfg_key, default_val))
+        for spec in DIRECTORY_SPECS:
+            self._dir_inputs[spec.config_key].setText(
+                overrides.get(spec.config_key) or cfg.get(spec.config_key, spec.default_path)
+            )
 
     def run_preview(self) -> None:
         self._execute_scan(dry_run=True)
@@ -215,14 +234,14 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Downsort PyQt6 GUI")
     parser.add_argument("--cli-bin", required=True)
     parser.add_argument("--config", default=None)
-    for _attr_name, cfg_key, cli_flag, _label, _default in DIRECTORY_SPECS:
-        parser.add_argument(cli_flag, dest=cfg_key, default=None)
+    for spec in DIRECTORY_SPECS:
+        parser.add_argument(spec.cli_flag, dest=spec.config_key, default=None)
     args = parser.parse_args(argv)
 
     overrides = {
-        cfg_key: getattr(args, cfg_key)
-        for _attr, cfg_key, _flag, _label, _def in DIRECTORY_SPECS
-        if getattr(args, cfg_key) is not None
+        spec.config_key: getattr(args, spec.config_key)
+        for spec in DIRECTORY_SPECS
+        if getattr(args, spec.config_key) is not None
     }
 
     app = QApplication(sys.argv[:1])

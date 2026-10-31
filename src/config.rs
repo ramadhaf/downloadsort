@@ -185,9 +185,12 @@ pub fn escape_json(s: &str) -> String {
         match ch {
             '"' => out.push_str("\\\""),
             '\\' => out.push_str("\\\\"),
+            '\u{0008}' => out.push_str("\\b"),
+            '\u{000C}' => out.push_str("\\f"),
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
+            c if (c as u32) <= 0x1F => out.push_str(&format!("\\u{:04x}", c as u32)),
             c => out.push(c),
         }
     }
@@ -287,9 +290,35 @@ fn parse_json_string(chars: &[char], i: &mut usize) -> Result<String, String> {
                 '"' => out.push('"'),
                 '\\' => out.push('\\'),
                 '/' => out.push('/'),
+                'b' => out.push('\u{0008}'),
+                'f' => out.push('\u{000C}'),
                 'n' => out.push('\n'),
                 'r' => out.push('\r'),
                 't' => out.push('\t'),
+                'u' => {
+                    let code = parse_hex4(chars, i)?;
+                    if (0xD800..=0xDBFF).contains(&code) {
+                        if *i + 2 <= chars.len() && chars[*i] == '\\' && chars[*i + 1] == 'u' {
+                            *i += 2;
+                            let low = parse_hex4(chars, i)?;
+                            if !(0xDC00..=0xDFFF).contains(&low) {
+                                return Err(format!("Invalid UTF-16 low surrogate: \\u{low:04x}"));
+                            }
+                            let combined =
+                                0x10000 + (((code as u32 - 0xD800) << 10) | (low as u32 - 0xDC00));
+                            let Some(ch) = char::from_u32(combined) else {
+                                return Err(format!("Invalid Unicode scalar value: {combined:x}"));
+                            };
+                            out.push(ch);
+                        } else {
+                            return Err(format!("Unpaired UTF-16 high surrogate: \\u{code:04x}"));
+                        }
+                    } else if let Some(ch) = char::from_u32(code as u32) {
+                        out.push(ch);
+                    } else {
+                        return Err(format!("Invalid Unicode escape: \\u{code:04x}"));
+                    }
+                }
                 other => out.push(other),
             }
         } else {
@@ -297,4 +326,13 @@ fn parse_json_string(chars: &[char], i: &mut usize) -> Result<String, String> {
         }
     }
     Err("Unterminated JSON string".to_string())
+}
+
+fn parse_hex4(chars: &[char], i: &mut usize) -> Result<u16, String> {
+    if *i + 4 > chars.len() {
+        return Err("Unexpected EOF in \\uXXXX escape".to_string());
+    }
+    let hex: String = chars[*i..*i + 4].iter().collect();
+    *i += 4;
+    u16::from_str_radix(&hex, 16).map_err(|_| format!("Invalid hex escape: \\u{hex}"))
 }

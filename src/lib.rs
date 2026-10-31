@@ -40,10 +40,66 @@ impl SessionOverrides {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScanCategory {
+    ActiveDownload,
+    Anime,
+    DesktopWallpaper,
+    MobileWallpaper,
+    ApplicationArchive,
+    Other,
+}
+
+impl ScanCategory {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ActiveDownload => "Active Download",
+            Self::Anime => "Anime",
+            Self::DesktopWallpaper => "Desktop Wallpaper",
+            Self::MobileWallpaper => "Mobile Wallpaper",
+            Self::ApplicationArchive => "Application Archive",
+            Self::Other => "Other",
+        }
+    }
+}
+
+impl From<WallpaperCategory> for ScanCategory {
+    fn from(category: WallpaperCategory) -> Self {
+        match category {
+            WallpaperCategory::Desktop => Self::DesktopWallpaper,
+            WallpaperCategory::Mobile => Self::MobileWallpaper,
+            WallpaperCategory::Ignored => Self::Other,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScanStatus {
+    Moved,
+    WillMove,
+    Installed,
+    WillInstall,
+    Skipped,
+    Ignored,
+}
+
+impl ScanStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Moved => "Moved",
+            Self::WillMove => "Will Move",
+            Self::Installed => "Installed",
+            Self::WillInstall => "Will Install",
+            Self::Skipped => "Skipped",
+            Self::Ignored => "Ignored",
+        }
+    }
+}
+
 pub struct ScanItem {
     pub file: String,
-    pub category: String,
-    pub status: String,
+    pub category: ScanCategory,
+    pub status: ScanStatus,
     pub reason: String,
     pub destination: String,
 }
@@ -208,8 +264,8 @@ where
             summary.files_skipped += 1;
             items.push(ScanItem {
                 file: name.to_string(),
-                category: "Active Download".to_string(),
-                status: "Skipped".to_string(),
+                category: ScanCategory::ActiveDownload,
+                status: ScanStatus::Skipped,
                 reason: "Active Download".to_string(),
                 destination: String::new(),
             });
@@ -218,27 +274,26 @@ where
 
         if is_video_file(path) {
             match handle_video(path, &anime_dir, dry_run) {
-                Ok(AnimeAction::Moved { show, dest }) => {
+                Ok(
+                    AnimeAction::Moved { show, dest } | AnimeAction::PlannedMove { show, dest },
+                ) => {
                     *anime_by_show.entry(show.clone()).or_insert(0) += 1;
-                    logs.push(format!("Anime moved [{show}]: {name} -> {}", dest.display()));
+                    if dry_run {
+                        logs.push(format!(
+                            "[Dry-Run] Would move anime [{show}]: {name} -> {}",
+                            dest.display()
+                        ));
+                    } else {
+                        logs.push(format!("Anime moved [{show}]: {name} -> {}", dest.display()));
+                    }
                     items.push(ScanItem {
                         file: name.to_string(),
-                        category: "Anime".to_string(),
-                        status: "Moved".to_string(),
-                        reason: format!("Show: {show}"),
-                        destination: dest.display().to_string(),
-                    });
-                }
-                Ok(AnimeAction::PlannedMove { show, dest }) => {
-                    *anime_by_show.entry(show.clone()).or_insert(0) += 1;
-                    logs.push(format!(
-                        "[Dry-Run] Would move anime [{show}]: {name} -> {}",
-                        dest.display()
-                    ));
-                    items.push(ScanItem {
-                        file: name.to_string(),
-                        category: "Anime".to_string(),
-                        status: "Will Move".to_string(),
+                        category: ScanCategory::Anime,
+                        status: if dry_run {
+                            ScanStatus::WillMove
+                        } else {
+                            ScanStatus::Moved
+                        },
                         reason: format!("Show: {show}"),
                         destination: dest.display().to_string(),
                     });
@@ -251,8 +306,8 @@ where
                     ));
                     items.push(ScanItem {
                         file: name.to_string(),
-                        category: "Anime".to_string(),
-                        status: "Skipped".to_string(),
+                        category: ScanCategory::Anime,
+                        status: ScanStatus::Skipped,
                         reason: "Collision".to_string(),
                         destination: dest.display().to_string(),
                     });
@@ -261,8 +316,8 @@ where
                     summary.files_skipped += 1;
                     items.push(ScanItem {
                         file: name.to_string(),
-                        category: "Other".to_string(),
-                        status: "Ignored".to_string(),
+                        category: ScanCategory::Other,
+                        status: ScanStatus::Ignored,
                         reason: "Non-Anime Video".to_string(),
                         destination: String::new(),
                     });
@@ -272,8 +327,8 @@ where
                     logs.push(format!("Warning: Failed processing {name}: {err}"));
                     items.push(ScanItem {
                         file: name.to_string(),
-                        category: "Anime".to_string(),
-                        status: "Skipped".to_string(),
+                        category: ScanCategory::Anime,
+                        status: ScanStatus::Skipped,
                         reason: format!("Error: {err}"),
                         destination: String::new(),
                     });
@@ -284,42 +339,42 @@ where
 
         if is_image_file(path) {
             match handle_wallpaper(path, &config, dry_run) {
-                Ok(WallpaperAction::Moved { category, dest }) => {
+                Ok(
+                    WallpaperAction::Moved {
+                        category,
+                        dest,
+                        ratio,
+                    }
+                    | WallpaperAction::PlannedMove {
+                        category,
+                        dest,
+                        ratio,
+                    },
+                ) => {
                     record_wallpaper_category(
                         category,
                         &mut summary.desktop_wallpapers_moved,
                         &mut summary.mobile_wallpapers_moved,
                     );
-                    logs.push(format!(
-                        "Wallpaper moved [{category:?}]: {name} -> {}",
-                        dest.display()
-                    ));
+                    if dry_run {
+                        logs.push(format!(
+                            "[Dry-Run] Would move wallpaper [{category:?}, ratio={ratio:.2}]: {name} -> {}",
+                            dest.display()
+                        ));
+                    } else {
+                        logs.push(format!(
+                            "Wallpaper moved [{category:?}]: {name} -> {}",
+                            dest.display()
+                        ));
+                    }
                     items.push(ScanItem {
                         file: name.to_string(),
-                        category: wallpaper_category_label(category).to_string(),
-                        status: "Moved".to_string(),
-                        reason: wallpaper_category_label(category).to_string(),
-                        destination: dest.display().to_string(),
-                    });
-                }
-                Ok(WallpaperAction::PlannedMove {
-                    category,
-                    dest,
-                    ratio,
-                }) => {
-                    record_wallpaper_category(
-                        category,
-                        &mut summary.desktop_wallpapers_moved,
-                        &mut summary.mobile_wallpapers_moved,
-                    );
-                    logs.push(format!(
-                        "[Dry-Run] Would move wallpaper [{category:?}, ratio={ratio:.2}]: {name} -> {}",
-                        dest.display()
-                    ));
-                    items.push(ScanItem {
-                        file: name.to_string(),
-                        category: wallpaper_category_label(category).to_string(),
-                        status: "Will Move".to_string(),
+                        category: ScanCategory::from(category),
+                        status: if dry_run {
+                            ScanStatus::WillMove
+                        } else {
+                            ScanStatus::Moved
+                        },
                         reason: format!("Ratio {ratio:.2}"),
                         destination: dest.display().to_string(),
                     });
@@ -332,8 +387,8 @@ where
                     ));
                     items.push(ScanItem {
                         file: name.to_string(),
-                        category: wallpaper_category_label(category).to_string(),
-                        status: "Skipped".to_string(),
+                        category: ScanCategory::from(category),
+                        status: ScanStatus::Skipped,
                         reason: "Collision".to_string(),
                         destination: dest.display().to_string(),
                     });
@@ -342,8 +397,8 @@ where
                     summary.files_skipped += 1;
                     items.push(ScanItem {
                         file: name.to_string(),
-                        category: "Other".to_string(),
-                        status: "Ignored".to_string(),
+                        category: ScanCategory::Other,
+                        status: ScanStatus::Ignored,
                         reason: "Square / Low-Res".to_string(),
                         destination: String::new(),
                     });
@@ -353,8 +408,8 @@ where
                     logs.push(format!("Warning: Failed processing image {name}: {err}"));
                     items.push(ScanItem {
                         file: name.to_string(),
-                        category: "Other".to_string(),
-                        status: "Skipped".to_string(),
+                        category: ScanCategory::Other,
+                        status: ScanStatus::Skipped,
                         reason: format!("Error: {err}"),
                         destination: String::new(),
                     });
@@ -365,10 +420,15 @@ where
 
         if is_tar_gz_file(path) {
             match handle_archive(path, &config, dry_run) {
-                Ok(AppAction::Installed(plan)) => {
+                Ok(AppAction::Installed(plan) | AppAction::PlannedInstall(plan)) => {
                     summary.apps_installed += 1;
+                    let prefix = if dry_run {
+                        "[Dry-Run] Would install application"
+                    } else {
+                        "Application installed"
+                    };
                     logs.push(format!(
-                        "Application installed [{}]: dir={}, bin={}, icon={}, desktop={}",
+                        "{prefix} [{}]: dir={}, bin={}, icon={}, desktop={}",
                         plan.app_name,
                         plan.install_dir.display(),
                         plan.binary.display(),
@@ -377,26 +437,12 @@ where
                     ));
                     items.push(ScanItem {
                         file: name.to_string(),
-                        category: "Application Archive".to_string(),
-                        status: "Installed".to_string(),
-                        reason: format!("App: {}", plan.app_name),
-                        destination: plan.install_dir.display().to_string(),
-                    });
-                }
-                Ok(AppAction::PlannedInstall(plan)) => {
-                    summary.apps_installed += 1;
-                    logs.push(format!(
-                        "[Dry-Run] Would install application [{}]: dir={}, bin={}, icon={}, desktop={}",
-                        plan.app_name,
-                        plan.install_dir.display(),
-                        plan.binary.display(),
-                        plan.icon,
-                        plan.desktop_file.display()
-                    ));
-                    items.push(ScanItem {
-                        file: name.to_string(),
-                        category: "Application Archive".to_string(),
-                        status: "Will Install".to_string(),
+                        category: ScanCategory::ApplicationArchive,
+                        status: if dry_run {
+                            ScanStatus::WillInstall
+                        } else {
+                            ScanStatus::Installed
+                        },
                         reason: format!("App: {}", plan.app_name),
                         destination: plan.install_dir.display().to_string(),
                     });
@@ -405,8 +451,8 @@ where
                     summary.files_skipped += 1;
                     items.push(ScanItem {
                         file: name.to_string(),
-                        category: "Other".to_string(),
-                        status: "Ignored".to_string(),
+                        category: ScanCategory::Other,
+                        status: ScanStatus::Ignored,
                         reason: "Non-App Archive".to_string(),
                         destination: String::new(),
                     });
@@ -416,8 +462,8 @@ where
                     logs.push(format!("Warning: Failed processing archive {name}: {err}"));
                     items.push(ScanItem {
                         file: name.to_string(),
-                        category: "Application Archive".to_string(),
-                        status: "Skipped".to_string(),
+                        category: ScanCategory::ApplicationArchive,
+                        status: ScanStatus::Skipped,
                         reason: format!("Error: {err}"),
                         destination: String::new(),
                     });
@@ -429,8 +475,8 @@ where
         summary.files_skipped += 1;
         items.push(ScanItem {
             file: name.to_string(),
-            category: "Other".to_string(),
-            status: "Ignored".to_string(),
+            category: ScanCategory::Other,
+            status: ScanStatus::Ignored,
             reason: "Unrecognized".to_string(),
             destination: String::new(),
         });
@@ -468,14 +514,6 @@ where
     Ok(report)
 }
 
-fn wallpaper_category_label(category: WallpaperCategory) -> &'static str {
-    match category {
-        WallpaperCategory::Desktop => "Desktop Wallpaper",
-        WallpaperCategory::Mobile => "Mobile Wallpaper",
-        WallpaperCategory::Ignored => "Other",
-    }
-}
-
 fn format_json_report(dry_run: bool, summary: &ScanSummary, items: &[ScanItem]) -> String {
     let mut out = String::new();
     out.push_str("{\n");
@@ -509,11 +547,11 @@ fn format_json_report(dry_run: bool, summary: &ScanSummary, items: &[ScanItem]) 
         out.push_str(&format!("      \"file\": \"{}\",\n", escape_json(&item.file)));
         out.push_str(&format!(
             "      \"category\": \"{}\",\n",
-            escape_json(&item.category)
+            escape_json(item.category.as_str())
         ));
         out.push_str(&format!(
             "      \"status\": \"{}\",\n",
-            escape_json(&item.status)
+            escape_json(item.status.as_str())
         ));
         out.push_str(&format!(
             "      \"reason\": \"{}\",\n",
