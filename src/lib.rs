@@ -365,48 +365,40 @@ where
 
         if is_tar_gz_file(path) {
             match handle_archive(path, &config, dry_run) {
-                Ok(AppAction::Installed {
-                    app_name,
-                    install_dir,
-                    binary,
-                    icon,
-                    desktop_file,
-                }) => {
+                Ok(AppAction::Installed(plan)) => {
                     summary.apps_installed += 1;
                     logs.push(format!(
-                        "Application installed [{app_name}]: dir={}, bin={}, icon={icon}, desktop={}",
-                        install_dir.display(),
-                        binary.display(),
-                        desktop_file.display()
+                        "Application installed [{}]: dir={}, bin={}, icon={}, desktop={}",
+                        plan.app_name,
+                        plan.install_dir.display(),
+                        plan.binary.display(),
+                        plan.icon,
+                        plan.desktop_file.display()
                     ));
                     items.push(ScanItem {
                         file: name.to_string(),
                         category: "Application Archive".to_string(),
                         status: "Installed".to_string(),
-                        reason: format!("App: {app_name}"),
-                        destination: install_dir.display().to_string(),
+                        reason: format!("App: {}", plan.app_name),
+                        destination: plan.install_dir.display().to_string(),
                     });
                 }
-                Ok(AppAction::PlannedInstall {
-                    app_name,
-                    install_dir,
-                    binary,
-                    icon,
-                    desktop_file,
-                }) => {
+                Ok(AppAction::PlannedInstall(plan)) => {
                     summary.apps_installed += 1;
                     logs.push(format!(
-                        "[Dry-Run] Would install application [{app_name}]: dir={}, bin={}, icon={icon}, desktop={}",
-                        install_dir.display(),
-                        binary.display(),
-                        desktop_file.display()
+                        "[Dry-Run] Would install application [{}]: dir={}, bin={}, icon={}, desktop={}",
+                        plan.app_name,
+                        plan.install_dir.display(),
+                        plan.binary.display(),
+                        plan.icon,
+                        plan.desktop_file.display()
                     ));
                     items.push(ScanItem {
                         file: name.to_string(),
                         category: "Application Archive".to_string(),
                         status: "Will Install".to_string(),
-                        reason: format!("App: {app_name}"),
-                        destination: install_dir.display().to_string(),
+                        reason: format!("App: {}", plan.app_name),
+                        destination: plan.install_dir.display().to_string(),
                     });
                 }
                 Ok(AppAction::IgnoredNonApp) => {

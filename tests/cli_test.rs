@@ -14,6 +14,7 @@ struct TestEnv {
     apps: PathBuf,
     launchers: PathBuf,
     bin_dir: PathBuf,
+    xdg_data: PathBuf,
 }
 
 impl TestEnv {
@@ -38,10 +39,30 @@ impl TestEnv {
             apps: root.join("apps"),
             launchers: root.join("launchers"),
             bin_dir: root.join("bin"),
+            xdg_data: root.join("xdg_data"),
             root,
         };
         env.write_config();
         env
+    }
+
+    fn run_cli<I, S>(&self, args: I) -> Result<String, String>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<std::ffi::OsStr>,
+    {
+        let exe = env!("CARGO_BIN_EXE_downsort");
+        let output = std::process::Command::new(exe)
+            .env("HOME", &self.root)
+            .env("XDG_DATA_HOME", &self.xdg_data)
+            .args(args)
+            .output()
+            .map_err(|e| format!("Failed to spawn downsort: {e}"))?;
+        if output.status.success() {
+            Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+        } else {
+            Err(String::from_utf8_lossy(&output.stderr).into_owned())
+        }
     }
 
     fn write_config(&self) {
@@ -162,12 +183,18 @@ fn sorts_anime_videos_preserves_filenames_handles_collisions_and_dry_run() {
     let ep1 = "[SubsPlease] Frieren - Beyond Journey's End - 01 (1080p) [98234ABC].mkv";
     let ep2 = "[Erai-raws] Dandadan - S01E02 [720p].MP4";
     let ep3 = "[HorribleSubs] Mob Psycho 100 - 12 [1080p].webm";
+    let ep4 = "[SubsPlease] Frieren - 01 - The Journey's End [1080p].mkv";
+    let unsafe_dotdot = "[SubsPlease] .. - 01 [1080p].mkv";
+    let unsafe_dot = "[SubsPlease] . - 01 [1080p].mkv";
     let non_anime1 = "tutorial.mp4";
     let non_anime2 = "document[final].mp4";
 
     fs::write(env.source.join(ep1), b"ep1-bytes").unwrap();
     fs::write(env.source.join(ep2), b"ep2-bytes").unwrap();
     fs::write(env.source.join(ep3), b"ep3-new-bytes").unwrap();
+    fs::write(env.source.join(ep4), b"ep4-bytes").unwrap();
+    fs::write(env.source.join(unsafe_dotdot), b"dotdot-bytes").unwrap();
+    fs::write(env.source.join(unsafe_dot), b"dot-bytes").unwrap();
     fs::write(env.source.join(non_anime1), b"tut").unwrap();
     fs::write(env.source.join(non_anime2), b"doc").unwrap();
 
@@ -195,6 +222,13 @@ fn sorts_anime_videos_preserves_filenames_handles_collisions_and_dry_run() {
     assert!(!env.source.join(ep1).exists());
     assert!(env.anime.join("Dandadan").join(ep2).exists());
     assert!(!env.source.join(ep2).exists());
+    assert!(env.anime.join("Frieren").join(ep4).exists());
+    assert!(!env.source.join(ep4).exists());
+
+    assert!(env.source.join(unsafe_dotdot).exists(), "'..' show title must be ignored");
+    assert!(!env.root.join(unsafe_dotdot).exists(), "'..' must not write outside anime dir");
+    assert!(env.source.join(unsafe_dot).exists(), "'.' show title must be ignored");
+    assert!(!env.anime.join(unsafe_dot).exists(), "'.' must not write directly into anime dir");
 
     assert_eq!(
         fs::read(mob_dir.join(ep3)).unwrap(),
@@ -361,7 +395,7 @@ fn extracts_app_tarballs_creates_desktop_and_symlink_trashes_archive_and_skips_n
     let docs_tar = env.source.join("project-docs-1.0.tar.gz");
     create_tar_gz(&docs_tar, &docs_stage, &["README.md", "notes.txt"]);
 
-    let dry_out = downsort::run_cli([
+    let dry_out = env.run_cli([
         "--config",
         env.config_path.to_str().unwrap(),
         "--dry-run",
@@ -378,7 +412,7 @@ fn extracts_app_tarballs_creates_desktop_and_symlink_trashes_archive_and_skips_n
     assert!(postman_tar.exists());
     assert!(docs_tar.exists());
 
-    let live_out = downsort::run_cli(["--config", env.config_path.to_str().unwrap()])
+    let live_out = env.run_cli(["--config", env.config_path.to_str().unwrap()])
         .expect("live run should succeed");
     assert!(live_out.contains("discord"));
 
@@ -393,7 +427,10 @@ fn extracts_app_tarballs_creates_desktop_and_symlink_trashes_archive_and_skips_n
     assert!(desktop_text.contains("[Desktop Entry]"));
     assert!(desktop_text.contains("Type=Application"));
     assert!(desktop_text.contains("Name=Discord"));
-    assert!(desktop_text.contains(&format!("Exec={}", installed_discord_bin.display())));
+    assert!(
+        desktop_text.contains(&format!("Exec=\"{}\"", installed_discord_bin.display())),
+        "Exec should be quoted in desktop file: {desktop_text}"
+    );
     assert!(desktop_text.contains(&format!("Icon={}", installed_discord_icon.display())));
     assert!(desktop_text.contains("Categories=Utility;Application;"));
 
@@ -409,9 +446,10 @@ fn extracts_app_tarballs_creates_desktop_and_symlink_trashes_archive_and_skips_n
 
     assert!(!discord_tar.exists(), "discord archive should be moved out of downloads");
     assert!(!postman_tar.exists(), "postman archive should be moved out of downloads");
-    let trash_files = env.root.join("Trash").join("files");
-    assert!(trash_files.join("discord-0.0.28.tar.gz").exists(), "discord archive should be in Trash");
-    assert!(trash_files.join("postman-linux-x64.tgz").exists(), "postman archive should be in Trash");
+    let trash_files = env.xdg_data.join("Trash").join("files");
+    assert!(trash_files.join("discord-0.0.28.tar.gz").exists(), "discord archive should be in XDG_DATA_HOME/Trash");
+    assert!(trash_files.join("postman-linux-x64.tgz").exists(), "postman archive should be in XDG_DATA_HOME/Trash");
+    assert!(!env.root.join("Trash").exists(), "Removed <launchers>/../Trash heuristic must not be used");
 
     assert!(docs_tar.exists(), "non-app tarball must remain in downloads");
 
@@ -420,7 +458,7 @@ fn extracts_app_tarballs_creates_desktop_and_symlink_trashes_archive_and_skips_n
     let discord_tar_v2 = env.source.join("discord-0.0.29.tar.gz");
     create_tar_gz(&discord_tar_v2, &build_dir, &["Discord"]);
 
-    downsort::run_cli(["--config", env.config_path.to_str().unwrap()])
+    env.run_cli(["--config", env.config_path.to_str().unwrap()])
         .expect("upgrade run should succeed");
     assert_eq!(
         fs::read(&installed_discord_bin).unwrap(),
@@ -428,6 +466,64 @@ fn extracts_app_tarballs_creates_desktop_and_symlink_trashes_archive_and_skips_n
         "existing app should be upgraded in place"
     );
     assert!(!discord_tar_v2.exists());
+
+    // Verify relative Session Override paths with spaces produce absolute quoted Exec= and RFC 2396 percent-encoded .trashinfo Path=
+    // and fallback to ~/.local/share/Trash when XDG_DATA_HOME is empty
+    let space_source = env.root.join("My Downloads");
+    fs::create_dir_all(&space_source).unwrap();
+    let sublime_stage = build_dir.join("Sublime Text");
+    fs::create_dir_all(&sublime_stage).unwrap();
+    let sublime_bin = sublime_stage.join("sublime_text");
+    fs::write(&sublime_bin, b"\x7fELF-sublime").unwrap();
+    set_executable(&sublime_bin);
+    let sublime_tar = space_source.join("sublime_text-4.0.tar.gz");
+    create_tar_gz(&sublime_tar, &build_dir, &["Sublime Text"]);
+
+    let exe = env!("CARGO_BIN_EXE_downsort");
+    let rel_cmd = std::process::Command::new(exe)
+        .current_dir(&env.root)
+        .env("HOME", &env.root)
+        .env("XDG_DATA_HOME", "")
+        .args([
+            "--config",
+            "config.json",
+            "--source",
+            "./My Downloads",
+            "--apps-dir",
+            "./My Apps",
+        ])
+        .output()
+        .expect("downsort should run with relative paths and spaces");
+    assert!(rel_cmd.status.success(), "stderr: {}", String::from_utf8_lossy(&rel_cmd.stderr));
+
+    let abs_sublime_bin = env.root.join("My Apps").join("sublime-text").join("sublime_text");
+    assert!(abs_sublime_bin.exists());
+    let sublime_desktop_text = fs::read_to_string(env.launchers.join("sublime-text.desktop")).unwrap();
+    assert!(
+        sublime_desktop_text.contains(&format!("Exec=\"{}\"", abs_sublime_bin.display())),
+        "Desktop Exec should be quoted absolute path: {sublime_desktop_text}"
+    );
+    assert_eq!(
+        fs::read_link(env.bin_dir.join("sublime-text")).unwrap(),
+        abs_sublime_bin
+    );
+
+    let fallback_trash_info = env
+        .root
+        .join(".local/share/Trash/info/sublime_text-4.0.tar.gz.trashinfo");
+    assert!(
+        fallback_trash_info.exists(),
+        "When XDG_DATA_HOME is empty, should use ~/.local/share/Trash"
+    );
+    let trashinfo_text = fs::read_to_string(&fallback_trash_info).unwrap();
+    let expected_encoded_path = format!(
+        "Path={}/My%20Downloads/sublime_text-4.0.tar.gz",
+        env.root.display()
+    );
+    assert!(
+        trashinfo_text.contains(&expected_encoded_path),
+        "trashinfo Path= should be percent-encoded and absolute: {trashinfo_text}"
+    );
 }
 
 #[test]
@@ -466,8 +562,123 @@ fn detects_elf_without_exec_bit_and_rejects_path_traversal_tarball() {
         .expect("tar should build traversal archive");
     assert!(status.success());
 
-    let out = downsort::run_cli(["--config", env.config_path.to_str().unwrap()])
-        .expect("CLI should succeed and isolate bad archive");
+    // Archive with symlink pointing to /etc/passwd
+    let sym_abs_stage = build_dir.join("sym_abs");
+    fs::create_dir_all(&sym_abs_stage).unwrap();
+    let sym_abs_bin = sym_abs_stage.join("symapp");
+    fs::write(&sym_abs_bin, b"\x7fELF-symapp").unwrap();
+    set_executable(&sym_abs_bin);
+    std::os::unix::fs::symlink("/etc/passwd", sym_abs_stage.join("passwd_link")).unwrap();
+    let sym_abs_tar = env.source.join("symapp-1.0.tar.gz");
+    create_tar_gz(&sym_abs_tar, &build_dir, &["sym_abs"]);
+
+    // Archive with symlink pointing to ../../outside
+    let sym_rel_stage = build_dir.join("sym_rel");
+    fs::create_dir_all(&sym_rel_stage).unwrap();
+    let sym_rel_bin = sym_rel_stage.join("relapp");
+    fs::write(&sym_rel_bin, b"\x7fELF-relapp").unwrap();
+    set_executable(&sym_rel_bin);
+    std::os::unix::fs::symlink("../../outside", sym_rel_stage.join("escape_link")).unwrap();
+    let sym_rel_tar = env.source.join("relapp-1.0.tar.gz");
+    create_tar_gz(&sym_rel_tar, &build_dir, &["sym_rel"]);
+
+    // Archive with hardlink pointing to /etc/passwd
+    let hard_tar = env.source.join("hardapp-1.0.tar.gz");
+    let py_hardlink = r#"
+import io, sys, tarfile
+with tarfile.open(sys.argv[1], "w:gz") as tf:
+    data = b"\x7fELF-hardapp"
+    ti_bin = tarfile.TarInfo("hardapp/hardapp")
+    ti_bin.size = len(data)
+    ti_bin.mode = 0o755
+    tf.addfile(ti_bin, io.BytesIO(data))
+    ti_lnk = tarfile.TarInfo("hardapp/evil_hardlink")
+    ti_lnk.type = tarfile.LNKTYPE
+    ti_lnk.linkname = "/etc/passwd"
+    tf.addfile(ti_lnk)
+"#;
+    let hard_status = std::process::Command::new("python3")
+        .arg("-c")
+        .arg(py_hardlink)
+        .arg(&hard_tar)
+        .status()
+        .expect("python3 should create hardlink tar.gz");
+    assert!(hard_status.success());
+
+    // Archive with top-level non-executable .sh script (mode 0644, depth 1 after root strip) -> should qualify
+    let top_sh_stage = build_dir.join("topsh");
+    fs::create_dir_all(&top_sh_stage).unwrap();
+    let top_sh_file = top_sh_stage.join("topsh.sh");
+    fs::write(&top_sh_file, b"#!/bin/sh\necho topsh\n").unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&top_sh_file).unwrap().permissions();
+        perms.set_mode(0o644);
+        fs::set_permissions(&top_sh_file, perms).unwrap();
+    }
+    let top_sh_tar = env.source.join("topsh-1.0.tar.gz");
+    create_tar_gz(&top_sh_tar, &build_dir, &["topsh"]);
+
+    // Archive with only a nested non-executable .sh script (mode 0644)
+    let nested_sh_stage = build_dir.join("libpkg").join("subdir");
+    fs::create_dir_all(&nested_sh_stage).unwrap();
+    let helper_sh = nested_sh_stage.join("helper.sh");
+    fs::write(&helper_sh, b"#!/bin/sh\necho helper\n").unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&helper_sh).unwrap().permissions();
+        perms.set_mode(0o644);
+        fs::set_permissions(&helper_sh, perms).unwrap();
+    }
+    let nested_sh_tar = env.source.join("libpkg-1.0.tar.gz");
+    create_tar_gz(&nested_sh_tar, &build_dir, &["libpkg"]);
+
+    // Archive with top-level directory AND top-level symlink: dry-run and live must agree
+    let multi_top_stage = build_dir.join("multi_top");
+    let multi_sub = multi_top_stage.join("runner");
+    fs::create_dir_all(&multi_sub).unwrap();
+    let runner_bin = multi_sub.join("runner");
+    fs::write(&runner_bin, b"\x7fELF-runner").unwrap();
+    set_executable(&runner_bin);
+    fs::write(multi_sub.join("runner.png"), make_png_header(64, 64)).unwrap();
+    std::os::unix::fs::symlink("runner/runner", multi_top_stage.join("runner-link")).unwrap();
+    let runner_tar = env.source.join("runner-1.0.tar.gz");
+    create_tar_gz(&runner_tar, &multi_top_stage, &["runner", "runner-link"]);
+
+    let exe = env!("CARGO_BIN_EXE_downsort");
+    let dry_run_cmd = std::process::Command::new(exe)
+        .env("HOME", &env.root)
+        .env("XDG_DATA_HOME", &env.xdg_data)
+        .args(["--config", env.config_path.to_str().unwrap(), "--dry-run"])
+        .output()
+        .expect("dry-run binary should run");
+    assert!(dry_run_cmd.status.success());
+    let dry_out = String::from_utf8_lossy(&dry_run_cmd.stdout);
+
+    let live_cmd = std::process::Command::new(exe)
+        .env("HOME", &env.root)
+        .env("XDG_DATA_HOME", &env.xdg_data)
+        .args(["--config", env.config_path.to_str().unwrap()])
+        .output()
+        .expect("live binary should run");
+    assert!(live_cmd.status.success());
+    let out = String::from_utf8_lossy(&live_cmd.stdout);
+
+    let expected_runner_bin = env.apps.join("runner").join("runner").join("runner");
+    let expected_runner_icon = env.apps.join("runner").join("runner").join("runner.png");
+    assert!(
+        dry_out.contains(&format!("bin={}", expected_runner_bin.display())),
+        "dry-run should predict unstripped path when top-level symlink exists: {dry_out}"
+    );
+    assert!(
+        dry_out.contains(&format!("icon={}", expected_runner_icon.display())),
+        "dry-run should predict unstripped icon path: {dry_out}"
+    );
+    assert!(
+        out.contains(&format!("bin={}", expected_runner_bin.display())),
+        "live run should match dry-run binary path: {out}"
+    );
+    assert!(expected_runner_bin.exists());
 
     let installed_nvim = env.apps.join("nvim").join("nvim");
     assert!(
@@ -480,6 +691,18 @@ fn detects_elf_without_exec_bit_and_rejects_path_traversal_tarball() {
     assert!(evil_tar.exists(), "rejected traversal archive should remain in downloads");
     assert!(!env.apps.join("evil").exists());
     assert!(!env.root.join("escaped.sh").exists());
+    assert!(sym_abs_tar.exists(), "symlink traversal to /etc/passwd must be rejected");
+    assert!(!env.apps.join("symapp").exists());
+    assert!(sym_rel_tar.exists(), "symlink traversal to ../../outside must be rejected");
+    assert!(!env.apps.join("relapp").exists());
+    assert!(hard_tar.exists(), "hardlink traversal to /etc/passwd must be rejected");
+    assert!(!env.apps.join("hardapp").exists());
+    assert!(
+        env.apps.join("topsh").join("topsh.sh").exists(),
+        "top-level non-executable .sh should qualify and be installed"
+    );
+    assert!(nested_sh_tar.exists(), "archive with only nested non-exec .sh must be ignored");
+    assert!(!env.apps.join("libpkg").exists());
     assert!(out.to_lowercase().contains("warn"));
 }
 
@@ -515,6 +738,8 @@ fn end_to_end_mixed_batch_via_cli_binary_dry_run_and_live() {
 
     let exe = env!("CARGO_BIN_EXE_downsort");
     let dry_cmd = std::process::Command::new(exe)
+        .env("HOME", &env.root)
+        .env("XDG_DATA_HOME", &env.xdg_data)
         .args(["--config", env.config_path.to_str().unwrap(), "--dry-run"])
         .output()
         .expect("downsort binary should run");
@@ -528,6 +753,8 @@ fn end_to_end_mixed_batch_via_cli_binary_dry_run_and_live() {
     assert!(!env.apps.exists());
 
     let live_cmd = std::process::Command::new(exe)
+        .env("HOME", &env.root)
+        .env("XDG_DATA_HOME", &env.xdg_data)
         .args(["--config", env.config_path.to_str().unwrap()])
         .output()
         .expect("downsort binary should run");
@@ -550,7 +777,7 @@ fn end_to_end_mixed_batch_via_cli_binary_dry_run_and_live() {
     assert!(env.apps.join("wezterm").join("wezterm").exists());
     assert!(env.launchers.join("wezterm.desktop").exists());
     assert!(env.bin_dir.join("wezterm").exists());
-    assert!(env.root.join("Trash").join("files").join("wezterm-2026.tar.gz").exists());
+    assert!(env.xdg_data.join("Trash").join("files").join("wezterm-2026.tar.gz").exists());
 
     assert!(env.source.join("home_video.mp4").exists());
     assert!(env.source.join("avatar.png").exists());

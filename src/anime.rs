@@ -53,15 +53,27 @@ pub fn extract_anime_show_title(filename: &str) -> Option<String> {
         break;
     }
 
-    let sep_idx = rest.rfind(" - ")?;
-    let title_part = rest[..sep_idx].trim();
-    let ep_part = rest[sep_idx + 3..].trim();
-
-    if title_part.is_empty() || !is_episode_token(ep_part) {
-        return None;
+    for (sep_idx, _) in rest.match_indices(" - ") {
+        let title_part = rest[..sep_idx].trim();
+        let ep_part = rest[sep_idx + 3..].trim();
+        let ep_segment = ep_part.split(" - ").next().unwrap_or("").trim();
+        if is_episode_token(ep_segment) {
+            if is_safe_show_title(title_part) {
+                return Some(title_part.to_string());
+            }
+            return None;
+        }
     }
 
-    Some(title_part.to_string())
+    None
+}
+
+fn is_safe_show_title(title: &str) -> bool {
+    !title.is_empty()
+        && title != "."
+        && title != ".."
+        && !title.contains('/')
+        && !title.contains('\\')
 }
 
 fn is_episode_token(token: &str) -> bool {

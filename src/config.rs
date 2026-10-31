@@ -137,16 +137,46 @@ impl Config {
 }
 
 pub fn expand_tilde(path: &str) -> PathBuf {
-    if path == "~" {
+    let expanded = if path == "~" {
         if let Ok(home) = std::env::var("HOME") {
-            return PathBuf::from(home);
+            PathBuf::from(home)
+        } else {
+            PathBuf::from(path)
         }
     } else if let Some(rest) = path.strip_prefix("~/") {
         if let Ok(home) = std::env::var("HOME") {
-            return PathBuf::from(home).join(rest);
+            PathBuf::from(home).join(rest)
+        } else {
+            PathBuf::from(path)
+        }
+    } else {
+        PathBuf::from(path)
+    };
+
+    let abs = if expanded.is_relative() {
+        match std::env::current_dir() {
+            Ok(cwd) => cwd.join(expanded),
+            Err(_) => expanded,
+        }
+    } else {
+        expanded
+    };
+
+    normalize_lexical_path(abs)
+}
+
+fn normalize_lexical_path(path: PathBuf) -> PathBuf {
+    let mut out = PathBuf::new();
+    for comp in path.components() {
+        match comp {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
         }
     }
-    PathBuf::from(path)
+    out
 }
 
 pub fn escape_json(s: &str) -> String {
