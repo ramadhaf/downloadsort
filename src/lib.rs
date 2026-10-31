@@ -5,7 +5,7 @@ pub mod wallpaper;
 
 use anime::{AnimeAction, handle_video, is_video_file};
 use app_installer::{AppAction, handle_archive, is_tar_gz_file};
-use config::{Config, escape_json, expand_tilde};
+use config::{Config, escape_json, resolve_dir};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -171,7 +171,7 @@ where
             }
             "--config" => {
                 if i + 1 < raw_args.len() && !raw_args[i + 1].starts_with("--") {
-                    config_path = Some(expand_tilde(&raw_args[i + 1]));
+                    config_path = Some(resolve_dir(&raw_args[i + 1]));
                     i += 2;
                 } else {
                     show_config = true;
@@ -230,7 +230,7 @@ where
         return Ok(config.to_json());
     }
 
-    let source_dir = config.resolve_dir(&config.source);
+    let source_dir = resolve_dir(&config.source);
     if !source_dir.exists() {
         return Err(format!(
             "Source directory does not exist: {}",
@@ -250,7 +250,7 @@ where
     let mut logs: Vec<String> = Vec::new();
     let mut items: Vec<ScanItem> = Vec::new();
 
-    let anime_dir = config.resolve_dir(&config.anime);
+    let anime_dir = resolve_dir(&config.anime);
 
     for path in &entries {
         let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
@@ -274,17 +274,20 @@ where
 
         if is_video_file(path) {
             match handle_video(path, &anime_dir, dry_run) {
-                Ok(
-                    AnimeAction::Moved { show, dest } | AnimeAction::PlannedMove { show, dest },
-                ) => {
-                    *anime_by_show.entry(show.clone()).or_insert(0) += 1;
+                Ok(AnimeAction::Moved(plan) | AnimeAction::PlannedMove(plan)) => {
+                    *anime_by_show.entry(plan.show.clone()).or_insert(0) += 1;
                     if dry_run {
                         logs.push(format!(
-                            "[Dry-Run] Would move anime [{show}]: {name} -> {}",
-                            dest.display()
+                            "[Dry-Run] Would move anime [{}]: {name} -> {}",
+                            plan.show,
+                            plan.dest.display()
                         ));
                     } else {
-                        logs.push(format!("Anime moved [{show}]: {name} -> {}", dest.display()));
+                        logs.push(format!(
+                            "Anime moved [{}]: {name} -> {}",
+                            plan.show,
+                            plan.dest.display()
+                        ));
                     }
                     items.push(ScanItem {
                         file: name.to_string(),
@@ -294,8 +297,8 @@ where
                         } else {
                             ScanStatus::Moved
                         },
-                        reason: format!("Show: {show}"),
-                        destination: dest.display().to_string(),
+                        reason: format!("Show: {}", plan.show),
+                        destination: plan.dest.display().to_string(),
                     });
                 }
                 Ok(AnimeAction::SkippedCollision { show, dest }) => {
@@ -339,44 +342,36 @@ where
 
         if is_image_file(path) {
             match handle_wallpaper(path, &config, dry_run) {
-                Ok(
-                    WallpaperAction::Moved {
-                        category,
-                        dest,
-                        ratio,
-                    }
-                    | WallpaperAction::PlannedMove {
-                        category,
-                        dest,
-                        ratio,
-                    },
-                ) => {
+                Ok(WallpaperAction::Moved(plan) | WallpaperAction::PlannedMove(plan)) => {
                     record_wallpaper_category(
-                        category,
+                        plan.category,
                         &mut summary.desktop_wallpapers_moved,
                         &mut summary.mobile_wallpapers_moved,
                     );
                     if dry_run {
                         logs.push(format!(
-                            "[Dry-Run] Would move wallpaper [{category:?}, ratio={ratio:.2}]: {name} -> {}",
-                            dest.display()
+                            "[Dry-Run] Would move wallpaper [{:?}, ratio={:.2}]: {name} -> {}",
+                            plan.category,
+                            plan.ratio,
+                            plan.dest.display()
                         ));
                     } else {
                         logs.push(format!(
-                            "Wallpaper moved [{category:?}]: {name} -> {}",
-                            dest.display()
+                            "Wallpaper moved [{:?}]: {name} -> {}",
+                            plan.category,
+                            plan.dest.display()
                         ));
                     }
                     items.push(ScanItem {
                         file: name.to_string(),
-                        category: ScanCategory::from(category),
+                        category: ScanCategory::from(plan.category),
                         status: if dry_run {
                             ScanStatus::WillMove
                         } else {
                             ScanStatus::Moved
                         },
-                        reason: format!("Ratio {ratio:.2}"),
-                        destination: dest.display().to_string(),
+                        reason: format!("Ratio {:.2}", plan.ratio),
+                        destination: plan.dest.display().to_string(),
                     });
                 }
                 Ok(WallpaperAction::SkippedCollision { category, dest }) => {

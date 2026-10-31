@@ -42,7 +42,7 @@ impl Default for Config {
 
 impl Config {
     pub fn default_config_path() -> PathBuf {
-        expand_tilde("~/.config/downsort/config.json")
+        resolve_dir("~/.config/downsort/config.json")
     }
 
     pub fn load_or_init(path: &Path, write_if_missing: bool) -> Result<Self, String> {
@@ -130,13 +130,9 @@ impl Config {
 
         Ok(cfg)
     }
-
-    pub fn resolve_dir(&self, raw: &str) -> PathBuf {
-        expand_tilde(raw)
-    }
 }
 
-pub fn expand_tilde(path: &str) -> PathBuf {
+pub fn resolve_dir(path: &str) -> PathBuf {
     let expanded = if path == "~" {
         if let Ok(home) = std::env::var("HOME") {
             PathBuf::from(home)

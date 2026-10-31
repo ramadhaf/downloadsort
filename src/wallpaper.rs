@@ -1,4 +1,4 @@
-use crate::config::{Config, WallpaperThresholds};
+use crate::config::{Config, WallpaperThresholds, resolve_dir};
 use crate::move_file;
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom};
@@ -11,18 +11,17 @@ pub enum WallpaperCategory {
     Ignored,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct WallpaperMovePlan {
+    pub category: WallpaperCategory,
+    pub dest: PathBuf,
+    pub ratio: f64,
+}
+
 pub enum WallpaperAction {
     Ignored,
-    Moved {
-        category: WallpaperCategory,
-        dest: PathBuf,
-        ratio: f64,
-    },
-    PlannedMove {
-        category: WallpaperCategory,
-        dest: PathBuf,
-        ratio: f64,
-    },
+    Moved(WallpaperMovePlan),
+    PlannedMove(WallpaperMovePlan),
     SkippedCollision {
         category: WallpaperCategory,
         dest: PathBuf,
@@ -190,8 +189,8 @@ pub fn handle_wallpaper(
     let category = classify_dimensions(width, height, &config.thresholds);
 
     let target_dir = match category {
-        WallpaperCategory::Desktop => config.resolve_dir(&config.desktop_wallpapers),
-        WallpaperCategory::Mobile => config.resolve_dir(&config.mobile_wallpapers),
+        WallpaperCategory::Desktop => resolve_dir(&config.desktop_wallpapers),
+        WallpaperCategory::Mobile => resolve_dir(&config.mobile_wallpapers),
         WallpaperCategory::Ignored => return Ok(WallpaperAction::Ignored),
     };
 
@@ -202,11 +201,11 @@ pub fn handle_wallpaper(
 
     let ratio = (width as f64) / (height as f64);
     if dry_run {
-        return Ok(WallpaperAction::PlannedMove {
+        return Ok(WallpaperAction::PlannedMove(WallpaperMovePlan {
             category,
             dest,
             ratio,
-        });
+        }));
     }
 
     fs::create_dir_all(&target_dir).map_err(|e| {
@@ -217,9 +216,9 @@ pub fn handle_wallpaper(
     })?;
     move_file(file_path, &dest)?;
 
-    Ok(WallpaperAction::Moved {
+    Ok(WallpaperAction::Moved(WallpaperMovePlan {
         category,
         dest,
         ratio,
-    })
+    }))
 }

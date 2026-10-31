@@ -2,10 +2,16 @@ use crate::move_file;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnimeMovePlan {
+    pub show: String,
+    pub dest: PathBuf,
+}
+
 pub enum AnimeAction {
     UnrecognizedVideo,
-    Moved { show: String, dest: PathBuf },
-    PlannedMove { show: String, dest: PathBuf },
+    Moved(AnimeMovePlan),
+    PlannedMove(AnimeMovePlan),
     SkippedCollision { show: String, dest: PathBuf },
 }
 
@@ -124,12 +130,12 @@ pub fn handle_video(
     }
 
     if dry_run {
-        return Ok(AnimeAction::PlannedMove { show, dest });
+        return Ok(AnimeAction::PlannedMove(AnimeMovePlan { show, dest }));
     }
 
     fs::create_dir_all(&show_dir)
         .map_err(|e| format!("Failed to create show directory {}: {e}", show_dir.display()))?;
     move_file(file_path, &dest)?;
 
-    Ok(AnimeAction::Moved { show, dest })
+    Ok(AnimeAction::Moved(AnimeMovePlan { show, dest }))
 }

@@ -1,4 +1,4 @@
-use crate::config::Config;
+use crate::config::{Config, resolve_dir};
 use crate::move_file;
 use std::fs::{self, File};
 use std::io::Read;
@@ -148,7 +148,7 @@ fn inspect_archive(archive_path: &Path, app_name: &str) -> Result<ArchiveInspect
             ));
         }
         if let Some(target) = entry.link_target {
-            if is_unsafe_link_target(entry.member_path, target) {
+            if is_unsafe_link_target(target) {
                 return Err(format!(
                     "Unsafe link target '{target}' for '{}' in {}",
                     entry.member_path,
@@ -233,6 +233,18 @@ fn single_common_root_dir(entries: &[(String, String)]) -> Option<String> {
     root
 }
 
+struct ExecCandidate {
+    rank: usize,
+    depth: usize,
+    rel_path: PathBuf,
+}
+
+struct IconCandidate {
+    rank: usize,
+    size: u64,
+    rel_path: PathBuf,
+}
+
 fn select_best_executable<T, F>(
     candidates: Vec<(PathBuf, bool, T)>,
     app_name: &str,
@@ -242,7 +254,7 @@ where
     F: FnMut(&T) -> bool,
 {
     let lower_app = app_name.to_ascii_lowercase();
-    let mut ranked: Vec<(usize, usize, PathBuf)> = Vec::new();
+    let mut ranked: Vec<ExecCandidate> = Vec::new();
 
     for (rel_path, has_exec_bit, ctx) in candidates {
         let depth = rel_path.components().count();
@@ -250,36 +262,46 @@ where
         let is_exec = has_exec_bit || is_top_level_sh || check_elf(&ctx);
         if is_exec {
             let rank = name_match_rank(&rel_path, &lower_app);
-            ranked.push((rank, depth, rel_path));
+            ranked.push(ExecCandidate {
+                rank,
+                depth,
+                rel_path,
+            });
         }
     }
 
     ranked.sort_by(|a, b| {
-        a.0.cmp(&b.0)
-            .then_with(|| a.1.cmp(&b.1))
-            .then_with(|| a.2.cmp(&b.2))
+        a.rank
+            .cmp(&b.rank)
+            .then_with(|| a.depth.cmp(&b.depth))
+            .then_with(|| a.rel_path.cmp(&b.rel_path))
     });
-    ranked.into_iter().next().map(|(_, _, p)| p)
+    ranked.into_iter().next().map(|c| c.rel_path)
 }
 
 fn select_best_icon(candidates: Vec<(PathBuf, u64)>, app_name: &str) -> Option<PathBuf> {
     let lower_app = app_name.to_ascii_lowercase();
-    let mut ranked: Vec<(usize, u64, PathBuf)> = Vec::new();
+    let mut ranked: Vec<IconCandidate> = Vec::new();
 
     for (rel_path, size) in candidates {
         if !is_icon_path(&rel_path) {
             continue;
         }
         let rank = name_match_rank(&rel_path, &lower_app).min(1);
-        ranked.push((rank, size, rel_path));
+        ranked.push(IconCandidate {
+            rank,
+            size,
+            rel_path,
+        });
     }
 
     ranked.sort_by(|a, b| {
-        a.0.cmp(&b.0)
-            .then_with(|| b.1.cmp(&a.1))
-            .then_with(|| a.2.cmp(&b.2))
+        a.rank
+            .cmp(&b.rank)
+            .then_with(|| b.size.cmp(&a.size))
+            .then_with(|| a.rel_path.cmp(&b.rel_path))
     });
-    ranked.into_iter().next().map(|(_, _, p)| p)
+    ranked.into_iter().next().map(|c| c.rel_path)
 }
 
 fn strip_common_root(member: &str, common_root: Option<&str>) -> PathBuf {
@@ -382,7 +404,7 @@ fn parse_tar_tvf_line(line: &str) -> Option<TarEntry<'_>> {
 }
 
 fn is_unsafe_member_path(member_path: &str) -> bool {
-    if member_path.starts_with('/') || member_path.starts_with('\\') {
+    if member_path.is_empty() || member_path.starts_with('/') || member_path.starts_with('\\') {
         return true;
     }
     let path = Path::new(member_path);
@@ -390,32 +412,8 @@ fn is_unsafe_member_path(member_path: &str) -> bool {
         .any(|c| matches!(c, Component::ParentDir | Component::RootDir | Component::Prefix(_)))
 }
 
-fn is_unsafe_link_target(member_path: &str, target: &str) -> bool {
-    if is_unsafe_member_path(target) {
-        return true;
-    }
-    let mut depth = Path::new(member_path)
-        .parent()
-        .map(|p| {
-            p.components()
-                .filter(|c| matches!(c, Component::Normal(_)))
-                .count()
-        })
-        .unwrap_or(0);
-    for comp in Path::new(target).components() {
-        match comp {
-            Component::RootDir | Component::Prefix(_) => return true,
-            Component::ParentDir => {
-                if depth == 0 {
-                    return true;
-                }
-                depth -= 1;
-            }
-            Component::Normal(_) => depth += 1,
-            Component::CurDir => {}
-        }
-    }
-    false
+fn is_unsafe_link_target(target: &str) -> bool {
+    is_unsafe_member_path(target)
 }
 
 pub fn handle_archive(
@@ -433,9 +431,9 @@ pub fn handle_archive(
         return Ok(AppAction::IgnoredNonApp);
     }
 
-    let apps_dir = config.resolve_dir(&config.applications);
+    let apps_dir = resolve_dir(&config.applications);
     let install_dir = apps_dir.join(&app_name);
-    let launchers_dir = config.resolve_dir(&config.desktop_launchers);
+    let launchers_dir = resolve_dir(&config.desktop_launchers);
     let desktop_file = launchers_dir.join(format!("{app_name}.desktop"));
 
     if dry_run {
@@ -523,7 +521,7 @@ pub fn handle_archive(
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|| "application-x-executable".to_string());
 
-    let bin_dir = config.resolve_dir(&config.bin_dir);
+    let bin_dir = resolve_dir(&config.bin_dir);
     fs::create_dir_all(&bin_dir)
         .map_err(|e| format!("Failed to create bin dir {}: {e}", bin_dir.display()))?;
     let symlink_path = bin_dir.join(&app_name);
@@ -569,22 +567,15 @@ pub fn handle_archive(
 
 fn find_main_executable(root: &Path, app_name: &str) -> Option<PathBuf> {
     let mut files = Vec::new();
-    collect_files_recursive(root, &mut files);
+    collect_files_recursive(root, root, &mut files);
 
-    let mut exec_inputs = Vec::new();
-    for path in files {
-        let Ok(meta) = fs::symlink_metadata(&path) else {
-            continue;
-        };
-        if !meta.file_type().is_file() {
-            continue;
-        }
-        let Ok(rel) = path.strip_prefix(root) else {
-            continue;
-        };
-        let has_exec_bit = (meta.permissions().mode() & 0o111) != 0;
-        exec_inputs.push((rel.to_path_buf(), has_exec_bit, path));
-    }
+    let exec_inputs = files
+        .into_iter()
+        .map(|(rel_path, meta, full_path)| {
+            let has_exec_bit = (meta.permissions().mode() & 0o111) != 0;
+            (rel_path, has_exec_bit, full_path)
+        })
+        .collect();
 
     select_best_executable(exec_inputs, app_name, |path| file_has_elf_magic(path))
         .map(|rel| root.join(rel))
@@ -616,26 +607,21 @@ fn ensure_executable_bit(path: &Path) -> Result<(), String> {
 
 fn find_best_icon(root: &Path, app_name: &str) -> Option<PathBuf> {
     let mut files = Vec::new();
-    collect_files_recursive(root, &mut files);
+    collect_files_recursive(root, root, &mut files);
 
-    let mut icon_inputs = Vec::new();
-    for path in files {
-        let Ok(meta) = fs::symlink_metadata(&path) else {
-            continue;
-        };
-        if !meta.file_type().is_file() {
-            continue;
-        }
-        let Ok(rel) = path.strip_prefix(root) else {
-            continue;
-        };
-        icon_inputs.push((rel.to_path_buf(), meta.len()));
-    }
+    let icon_inputs = files
+        .into_iter()
+        .map(|(rel_path, meta, _full_path)| (rel_path, meta.len()))
+        .collect();
 
     select_best_icon(icon_inputs, app_name).map(|rel| root.join(rel))
 }
 
-fn collect_files_recursive(dir: &Path, out: &mut Vec<PathBuf>) {
+fn collect_files_recursive(
+    root: &Path,
+    dir: &Path,
+    out: &mut Vec<(PathBuf, fs::Metadata, PathBuf)>,
+) {
     let Ok(read_dir) = fs::read_dir(dir) else {
         return;
     };
@@ -647,9 +633,11 @@ fn collect_files_recursive(dir: &Path, out: &mut Vec<PathBuf>) {
         };
         let ft = meta.file_type();
         if ft.is_dir() {
-            collect_files_recursive(&path, out);
+            collect_files_recursive(root, &path, out);
         } else if ft.is_file() {
-            out.push(path);
+            if let Ok(rel) = path.strip_prefix(root) {
+                out.push((rel.to_path_buf(), meta, path));
+            }
         }
     }
 }
@@ -693,10 +681,10 @@ fn resolve_trash_root() -> PathBuf {
     if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
         let trimmed = xdg.trim();
         if !trimmed.is_empty() {
-            return crate::config::expand_tilde(trimmed).join("Trash");
+            return resolve_dir(trimmed).join("Trash");
         }
     }
-    crate::config::expand_tilde("~/.local/share/Trash")
+    resolve_dir("~/.local/share/Trash")
 }
 
 fn move_to_trash(archive_path: &Path) -> Result<(), String> {
@@ -724,7 +712,7 @@ fn move_to_trash(archive_path: &Path) -> Result<(), String> {
     let trash_file_path = files_dir.join(&trash_name);
     let trash_info_path = info_dir.join(format!("{trash_name}.trashinfo"));
     let deletion_date = current_iso8601_timestamp();
-    let abs_archive_path = crate::config::expand_tilde(&archive_path.to_string_lossy());
+    let abs_archive_path = resolve_dir(&archive_path.to_string_lossy());
     let encoded_path = percent_encode_trash_path(&abs_archive_path);
     let info_contents = format!(
         "[Trash Info]\nPath={encoded_path}\nDeletionDate={deletion_date}\n"
