@@ -53,19 +53,22 @@ impl Config {
         } else {
             let cfg = Self::default();
             if write_if_missing {
-                if let Some(parent) = path.parent() {
-                    if !parent.as_os_str().is_empty() {
-                        fs::create_dir_all(parent).map_err(|e| {
-                            format!("Failed to create config directory {}: {e}", parent.display())
-                        })?;
-                    }
-                }
-                fs::write(path, cfg.to_json()).map_err(|e| {
-                    format!("Failed to write default config to {}: {e}", path.display())
-                })?;
+                cfg.save(path)?;
             }
             Ok(cfg)
         }
+    }
+
+    pub fn save(&self, path: &Path) -> Result<(), String> {
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                fs::create_dir_all(parent).map_err(|e| {
+                    format!("Failed to create config directory {}: {e}", parent.display())
+                })?;
+            }
+        }
+        fs::write(path, self.to_json())
+            .map_err(|e| format!("Failed to write config to {}: {e}", path.display()))
     }
 
     pub fn to_json(&self) -> String {
@@ -146,7 +149,7 @@ pub fn expand_tilde(path: &str) -> PathBuf {
     PathBuf::from(path)
 }
 
-fn escape_json(s: &str) -> String {
+pub fn escape_json(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for ch in s.chars() {
         match ch {

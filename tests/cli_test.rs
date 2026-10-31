@@ -559,3 +559,191 @@ fn end_to_end_mixed_batch_via_cli_binary_dry_run_and_live() {
     assert!(env.source.join("broken_archive.tar.gz").exists());
     assert!(env.source.join("source-code-1.0.tar.gz").exists());
 }
+
+#[test]
+fn session_overrides_save_config_and_structured_json_output() {
+    let env = TestEnv::new("json_and_overrides");
+    let custom_anime = env.root.join("custom_anime");
+    let custom_desktop = env.root.join("custom_desktop");
+    let custom_mobile = env.root.join("custom_mobile");
+    let custom_apps = env.root.join("custom_apps");
+
+    let ep = "[SubsPlease] Dandadan - 03 [1080p].mkv";
+    fs::write(env.source.join(ep), b"anime").unwrap();
+    fs::write(env.source.join("wall.png"), make_png_header(1920, 1080)).unwrap();
+    fs::write(env.source.join("square.png"), make_png_header(600, 600)).unwrap();
+    fs::write(env.source.join("partial.crdownload"), b"part").unwrap();
+    fs::write(env.source.join("notes.txt"), b"txt").unwrap();
+
+    // 1. Dry-run with --json and Session Overrides: must not mutate config.json on disk
+    let orig_config = fs::read_to_string(&env.config_path).unwrap();
+    let dry_json = downsort::run_cli([
+        "--config",
+        env.config_path.to_str().unwrap(),
+        "--anime-dir",
+        custom_anime.to_str().unwrap(),
+        "--desktop-wallpapers-dir",
+        custom_desktop.to_str().unwrap(),
+        "--mobile-wallpapers-dir",
+        custom_mobile.to_str().unwrap(),
+        "--apps-dir",
+        custom_apps.to_str().unwrap(),
+        "--dry-run",
+        "--json",
+    ])
+    .expect("dry-run --json should succeed");
+
+    assert_eq!(
+        fs::read_to_string(&env.config_path).unwrap(),
+        orig_config,
+        "Session Overrides must not overwrite saved config.json"
+    );
+    assert!(dry_json.contains("\"dry_run\": true"), "json: {dry_json}");
+    assert!(dry_json.contains("\"total_scanned\": 5"), "json: {dry_json}");
+    assert!(dry_json.contains("\"anime_moved\": 1"), "json: {dry_json}");
+    assert!(dry_json.contains("\"desktop_wallpapers_moved\": 1"), "json: {dry_json}");
+    assert!(dry_json.contains("\"files_skipped\": 3"), "json: {dry_json}");
+    assert!(dry_json.contains("\"status\": \"Will Move\""), "json: {dry_json}");
+    assert!(dry_json.contains("\"reason\": \"Active Download\""), "json: {dry_json}");
+    assert!(dry_json.contains("\"reason\": \"Square / Low-Res\""), "json: {dry_json}");
+    assert!(
+        dry_json.contains(&custom_anime.display().to_string()),
+        "destination should use Session Override anime dir: {dry_json}"
+    );
+
+    // 2. Live run with Session Overrides and --json
+    let live_json = downsort::run_cli([
+        "--config",
+        env.config_path.to_str().unwrap(),
+        "--anime-dir",
+        custom_anime.to_str().unwrap(),
+        "--desktop-wallpapers-dir",
+        custom_desktop.to_str().unwrap(),
+        "--json",
+    ])
+    .expect("live --json should succeed");
+
+    assert!(live_json.contains("\"dry_run\": false"), "json: {live_json}");
+    assert!(live_json.contains("\"status\": \"Moved\""), "json: {live_json}");
+    assert!(custom_anime.join("Dandadan").join(ep).exists());
+    assert!(custom_desktop.join("wall.png").exists());
+    assert_eq!(
+        fs::read_to_string(&env.config_path).unwrap(),
+        orig_config,
+        "Live run with Session Overrides still must not overwrite config.json without --save-config"
+    );
+
+    // 3. --save-config persists the Session Overrides to config.json
+    downsort::run_cli([
+        "--config",
+        env.config_path.to_str().unwrap(),
+        "--anime-dir",
+        custom_anime.to_str().unwrap(),
+        "--desktop-wallpapers-dir",
+        custom_desktop.to_str().unwrap(),
+        "--mobile-wallpapers-dir",
+        custom_mobile.to_str().unwrap(),
+        "--apps-dir",
+        custom_apps.to_str().unwrap(),
+        "--save-config",
+    ])
+    .expect("--save-config should succeed");
+
+    let updated_config = fs::read_to_string(&env.config_path).unwrap();
+    assert!(updated_config.contains(&custom_anime.display().to_string()));
+    assert!(updated_config.contains(&custom_desktop.display().to_string()));
+    assert!(updated_config.contains(&custom_mobile.display().to_string()));
+    assert!(updated_config.contains(&custom_apps.display().to_string()));
+}
+
+#[test]
+fn pyqt6_gui_loads_directories_previews_all_files_saves_config_and_sorts_live() {
+    let env = TestEnv::new("pyqt6_gui");
+    let override_anime = env.root.join("gui_override_anime");
+    let override_desktop = env.root.join("gui_override_desktop");
+
+    let ep = "[SubsPlease] Bleach - 01 [1080p].mkv";
+    fs::write(env.source.join(ep), b"bleach-video").unwrap();
+    fs::write(env.source.join("wall.png"), make_png_header(1920, 1080)).unwrap();
+    fs::write(env.source.join("readme.txt"), b"hello").unwrap();
+
+    let exe = env!("CARGO_BIN_EXE_downsort");
+    let orig_config = fs::read_to_string(&env.config_path).unwrap();
+
+    // Drive the PyQt6 MainWindow in offscreen mode through Python
+    let py_driver = r#"
+import os, sys
+os.environ["QT_QPA_PLATFORM"] = "offscreen"
+from PyQt6.QtWidgets import QApplication
+import gui
+
+app = QApplication([])
+cli_bin = sys.argv[1]
+cfg_path = sys.argv[2]
+override_anime = sys.argv[3]
+override_desktop = sys.argv[4]
+orig_cfg_text = open(cfg_path).read()
+
+win = gui.DownsortWindow(cli_bin=cli_bin, config_path=cfg_path)
+
+# 1. Verify initial 5 directory inputs loaded from config.json and initial Dry Run Preview populated all 3 files
+assert win.source_input.text().endswith("downloads"), win.source_input.text()
+assert win.anime_input.text().endswith("anime"), win.anime_input.text()
+assert win.desktop_wp_input.text().endswith("desktop_wp"), win.desktop_wp_input.text()
+assert win.mobile_wp_input.text().endswith("mobile_wp"), win.mobile_wp_input.text()
+assert win.apps_input.text().endswith("apps"), win.apps_input.text()
+
+assert win.table.columnCount() == 4
+assert win.table.rowCount() == 3, f"Expected 3 rows in preview table, got {win.table.rowCount()}"
+
+# 2. Edit anime & desktop wallpaper inputs (Session Override) and click Preview
+win.anime_input.setText(override_anime)
+win.desktop_wp_input.setText(override_desktop)
+win.preview_btn.click()
+
+# Verify config.json on disk is STILL untouched after Session Override preview
+assert open(cfg_path).read() == orig_cfg_text, "Preview must not overwrite config.json"
+
+# Verify table destinations reflect the Session Override paths
+destinations = [win.table.item(r, 3).text() for r in range(win.table.rowCount())]
+assert any(override_anime in d for d in destinations), f"Expected {override_anime} in {destinations}"
+assert any(override_desktop in d for d in destinations), f"Expected {override_desktop} in {destinations}"
+
+# 3. Click Sort Now: files should be moved using Session Override paths, config.json still untouched
+win.sort_btn.click()
+assert open(cfg_path).read() == orig_cfg_text, "Sort Now must not overwrite config.json without Save Config"
+assert "Anime: 1" in win.summary_label.text() or "Moved" in win.summary_label.text(), win.summary_label.text()
+
+# 4. Click Save Config: config.json on disk should now persist the new paths
+win.save_config_btn.click()
+saved_cfg = open(cfg_path).read()
+assert override_anime in saved_cfg, saved_cfg
+assert override_desktop in saved_cfg, saved_cfg
+print("GUI_TEST_OK")
+"#;
+
+    let cmd = std::process::Command::new("python3")
+        .env("QT_QPA_PLATFORM", "offscreen")
+        .env("PYTHONPATH", concat!(env!("CARGO_MANIFEST_DIR"), "/src"))
+        .arg("-c")
+        .arg(py_driver)
+        .arg(exe)
+        .arg(&env.config_path)
+        .arg(&override_anime)
+        .arg(&override_desktop)
+        .output()
+        .expect("python3 should run PyQt6 test");
+
+    let stdout = String::from_utf8_lossy(&cmd.stdout);
+    let stderr = String::from_utf8_lossy(&cmd.stderr);
+    assert!(
+        cmd.status.success() && stdout.contains("GUI_TEST_OK"),
+        "PyQt6 GUI test failed.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+
+    // Confirm files actually moved to Session Override directories on disk
+    assert!(override_anime.join("Bleach").join(ep).exists());
+    assert!(override_desktop.join("wall.png").exists());
+    assert!(env.source.join("readme.txt").exists());
+    assert_ne!(fs::read_to_string(&env.config_path).unwrap(), orig_config);
+}
