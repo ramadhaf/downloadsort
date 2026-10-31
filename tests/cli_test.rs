@@ -1,0 +1,561 @@
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+struct TestEnv {
+    root: PathBuf,
+    config_path: PathBuf,
+    source: PathBuf,
+    anime: PathBuf,
+    desktop_wp: PathBuf,
+    mobile_wp: PathBuf,
+    apps: PathBuf,
+    launchers: PathBuf,
+    bin_dir: PathBuf,
+}
+
+impl TestEnv {
+    fn new(prefix: &str) -> Self {
+        let id = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let root = std::env::temp_dir().join(format!(
+            "downsort_test_{}_{}_{}",
+            prefix,
+            std::process::id(),
+            id
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let source = root.join("downloads");
+        fs::create_dir_all(&source).unwrap();
+
+        let env = Self {
+            config_path: root.join("config.json"),
+            source,
+            anime: root.join("anime"),
+            desktop_wp: root.join("desktop_wp"),
+            mobile_wp: root.join("mobile_wp"),
+            apps: root.join("apps"),
+            launchers: root.join("launchers"),
+            bin_dir: root.join("bin"),
+            root,
+        };
+        env.write_config();
+        env
+    }
+
+    fn write_config(&self) {
+        let json = format!(
+            "{{\n  \"source\": \"{}\",\n  \"anime\": \"{}\",\n  \"desktop_wallpapers\": \"{}\",\n  \"mobile_wallpapers\": \"{}\",\n  \"applications\": \"{}\",\n  \"desktop_launchers\": \"{}\",\n  \"bin_dir\": \"{}\",\n  \"desktop_min_ratio\": 1.2,\n  \"mobile_max_ratio\": 0.8,\n  \"min_dimension\": 1280\n}}\n",
+            self.source.display(),
+            self.anime.display(),
+            self.desktop_wp.display(),
+            self.mobile_wp.display(),
+            self.apps.display(),
+            self.launchers.display(),
+            self.bin_dir.display(),
+        );
+        fs::write(&self.config_path, json).unwrap();
+    }
+}
+
+impl Drop for TestEnv {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.root);
+    }
+}
+
+fn snapshot_dir(dir: &Path) -> Vec<(String, Vec<u8>)> {
+    let mut entries: Vec<(String, Vec<u8>)> = fs::read_dir(dir)
+        .unwrap()
+        .map(|e| {
+            let p = e.unwrap().path();
+            (
+                p.file_name().unwrap().to_str().unwrap().to_string(),
+                fs::read(&p).unwrap(),
+            )
+        })
+        .collect();
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    entries
+}
+
+#[test]
+fn initializes_default_config_and_prints_with_show_config() {
+    let env = TestEnv::new("config_init");
+    let custom_cfg = env.root.join("nested").join("config.json");
+
+    // In dry-run without --show-config, missing config should not be written to disk
+    let dry_out = downsort::run_cli([
+        "--config",
+        custom_cfg.to_str().unwrap(),
+        "--source",
+        env.source.to_str().unwrap(),
+        "--dry-run",
+    ])
+    .expect("dry-run should succeed without writing missing config");
+    assert!(!custom_cfg.exists(), "dry-run must not create config.json on disk");
+    assert!(dry_out.contains("Dry run"));
+
+    // With --show-config, initializes and prints default config
+    let output = downsort::run_cli([
+        "--config",
+        custom_cfg.to_str().unwrap(),
+        "--show-config",
+    ])
+    .expect("CLI should succeed");
+
+    assert!(custom_cfg.exists(), "config.json should be created");
+    let saved = fs::read_to_string(&custom_cfg).unwrap();
+    assert!(saved.contains("\"source\""));
+    assert!(saved.contains("\"anime\""));
+    assert!(saved.contains("\"desktop_wallpapers\""));
+    assert!(saved.contains("\"mobile_wallpapers\""));
+    assert!(saved.contains("\"applications\""));
+    assert!(saved.contains("\"desktop_launchers\""));
+    assert!(saved.contains("\"bin_dir\""));
+    assert!(saved.contains("\"desktop_min_ratio\": 1.2"));
+    assert!(saved.contains("\"mobile_max_ratio\": 0.8"));
+    assert!(saved.contains("\"min_dimension\": 1280"));
+    assert!(output.contains("desktop_min_ratio"));
+}
+
+#[test]
+fn filters_active_downloads_and_dotfiles_and_respects_source_override() {
+    let env = TestEnv::new("filter_scan");
+
+    fs::write(env.source.join("movie.crdownload"), b"partial").unwrap();
+    fs::write(env.source.join("archive.tar.gz.part"), b"partial").unwrap();
+    fs::write(env.source.join("temp.tmp"), b"temp").unwrap();
+    fs::write(env.source.join(".hidden_file"), b"hidden").unwrap();
+    fs::write(env.source.join("notes.txt"), b"complete").unwrap();
+
+    let output = downsort::run_cli([
+        "--config",
+        env.config_path.to_str().unwrap(),
+        "--source",
+        env.source.to_str().unwrap(),
+        "--dry-run",
+    ])
+    .expect("CLI should succeed");
+
+    assert!(output.contains("Dry run"), "Output should indicate dry-run mode: {output}");
+    assert!(
+        output.contains("Total files scanned: 4"),
+        "Should count 4 non-hidden entries scanned: {output}"
+    );
+    assert!(
+        output.contains("Files skipped: 4"),
+        "Should report 4 files skipped (3 active downloads + 1 unrecognized): {output}"
+    );
+    assert!(env.source.join("movie.crdownload").exists());
+    assert!(env.source.join("archive.tar.gz.part").exists());
+    assert!(env.source.join("temp.tmp").exists());
+    assert!(env.source.join(".hidden_file").exists());
+    assert!(env.source.join("notes.txt").exists());
+}
+
+#[test]
+fn sorts_anime_videos_preserves_filenames_handles_collisions_and_dry_run() {
+    let env = TestEnv::new("anime_sort");
+
+    let ep1 = "[SubsPlease] Frieren - Beyond Journey's End - 01 (1080p) [98234ABC].mkv";
+    let ep2 = "[Erai-raws] Dandadan - S01E02 [720p].MP4";
+    let ep3 = "[HorribleSubs] Mob Psycho 100 - 12 [1080p].webm";
+    let non_anime1 = "tutorial.mp4";
+    let non_anime2 = "document[final].mp4";
+
+    fs::write(env.source.join(ep1), b"ep1-bytes").unwrap();
+    fs::write(env.source.join(ep2), b"ep2-bytes").unwrap();
+    fs::write(env.source.join(ep3), b"ep3-new-bytes").unwrap();
+    fs::write(env.source.join(non_anime1), b"tut").unwrap();
+    fs::write(env.source.join(non_anime2), b"doc").unwrap();
+
+    let dry_out = downsort::run_cli([
+        "--config",
+        env.config_path.to_str().unwrap(),
+        "--dry-run",
+    ])
+    .expect("dry-run should succeed");
+    assert!(
+        dry_out.contains("Frieren - Beyond Journey's End"),
+        "dry-run should mention show: {dry_out}"
+    );
+    assert!(!env.anime.exists(), "dry-run must not create anime directory");
+    assert!(env.source.join(ep1).exists());
+
+    let mob_dir = env.anime.join("Mob Psycho 100");
+    fs::create_dir_all(&mob_dir).unwrap();
+    fs::write(mob_dir.join(ep3), b"existing-ep3-bytes").unwrap();
+
+    let live_out = downsort::run_cli(["--config", env.config_path.to_str().unwrap()])
+        .expect("live run should succeed");
+
+    assert!(env.anime.join("Frieren - Beyond Journey's End").join(ep1).exists());
+    assert!(!env.source.join(ep1).exists());
+    assert!(env.anime.join("Dandadan").join(ep2).exists());
+    assert!(!env.source.join(ep2).exists());
+
+    assert_eq!(
+        fs::read(mob_dir.join(ep3)).unwrap(),
+        b"existing-ep3-bytes",
+        "existing destination file must not be overwritten"
+    );
+    assert!(env.source.join(ep3).exists(), "colliding source file must remain in downloads");
+    assert!(
+        live_out.to_lowercase().contains("warn") || live_out.to_lowercase().contains("skip"),
+        "live output should report collision warning/skip: {live_out}"
+    );
+
+    assert!(env.source.join(non_anime1).exists());
+    assert!(env.source.join(non_anime2).exists());
+    assert!(!env.anime.join("final").exists());
+}
+
+fn make_png_header(width: u32, height: u32) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]);
+    bytes.extend_from_slice(&13u32.to_be_bytes());
+    bytes.extend_from_slice(b"IHDR");
+    bytes.extend_from_slice(&width.to_be_bytes());
+    bytes.extend_from_slice(&height.to_be_bytes());
+    bytes.extend_from_slice(&[8, 6, 0, 0, 0]);
+    bytes.extend_from_slice(&0u32.to_be_bytes());
+    bytes
+}
+
+fn make_jpeg_header(width: u16, height: u16) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&[0xFF, 0xD8]);
+    bytes.extend_from_slice(&[0xFF, 0xE0, 0x00, 0x04, 0x00, 0x00]);
+    bytes.extend_from_slice(&[0xFF, 0xC0, 0x00, 0x0B, 0x08]);
+    bytes.extend_from_slice(&height.to_be_bytes());
+    bytes.extend_from_slice(&width.to_be_bytes());
+    bytes.extend_from_slice(&[0x01, 0x01, 0x11, 0x00]);
+    bytes.extend_from_slice(&[0xFF, 0xD9]);
+    bytes
+}
+
+fn make_webp_vp8x_header(width: u32, height: u32) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"RIFF");
+    bytes.extend_from_slice(&22u32.to_le_bytes());
+    bytes.extend_from_slice(b"WEBP");
+    bytes.extend_from_slice(b"VP8X");
+    bytes.extend_from_slice(&10u32.to_le_bytes());
+    bytes.extend_from_slice(&[0, 0, 0, 0]);
+    let w_minus_1 = width - 1;
+    let h_minus_1 = height - 1;
+    bytes.push((w_minus_1 & 0xFF) as u8);
+    bytes.push(((w_minus_1 >> 8) & 0xFF) as u8);
+    bytes.push(((w_minus_1 >> 16) & 0xFF) as u8);
+    bytes.push((h_minus_1 & 0xFF) as u8);
+    bytes.push(((h_minus_1 >> 8) & 0xFF) as u8);
+    bytes.push(((h_minus_1 >> 16) & 0xFF) as u8);
+    bytes
+}
+
+#[test]
+fn sorts_wallpapers_by_aspect_ratio_and_resolution_and_handles_corrupt_and_collisions() {
+    let env = TestEnv::new("wallpaper_sort");
+
+    fs::write(env.source.join("land_1080p.png"), make_png_header(1920, 1080)).unwrap();
+    fs::write(env.source.join("land_1440p.jpg"), make_jpeg_header(2560, 1440)).unwrap();
+    fs::write(env.source.join("mob_2400.webp"), make_webp_vp8x_header(1080, 2400)).unwrap();
+    fs::write(env.source.join("mob_2532.PNG"), make_png_header(1170, 2532)).unwrap();
+
+    fs::write(env.source.join("square_1000.png"), make_png_header(1000, 1000)).unwrap();
+    fs::write(env.source.join("boundary_1_2.png"), make_png_header(1536, 1280)).unwrap();
+    fs::write(env.source.join("boundary_0_8.png"), make_png_header(1024, 1280)).unwrap();
+    fs::write(env.source.join("lowres_800x600.jpg"), make_jpeg_header(800, 600)).unwrap();
+    fs::write(env.source.join("corrupt.png"), b"not-a-valid-png").unwrap();
+    fs::write(env.source.join("collide.png"), make_png_header(1920, 1080)).unwrap();
+
+    let dry_out = downsort::run_cli([
+        "--config",
+        env.config_path.to_str().unwrap(),
+        "--dry-run",
+    ])
+    .expect("dry-run should succeed");
+    assert!(!env.desktop_wp.exists(), "dry-run must not create desktop_wp dir");
+    assert!(!env.mobile_wp.exists(), "dry-run must not create mobile_wp dir");
+    assert!(dry_out.contains("land_1080p.png"), "dry-run should preview wallpaper: {dry_out}");
+
+    fs::create_dir_all(&env.desktop_wp).unwrap();
+    fs::write(env.desktop_wp.join("collide.png"), b"existing-desktop-wallpaper").unwrap();
+
+    let live_out = downsort::run_cli(["--config", env.config_path.to_str().unwrap()])
+        .expect("live run should succeed despite corrupt image");
+
+    assert!(env.desktop_wp.join("land_1080p.png").exists());
+    assert!(env.desktop_wp.join("land_1440p.jpg").exists());
+    assert!(!env.source.join("land_1080p.png").exists());
+    assert!(!env.source.join("land_1440p.jpg").exists());
+
+    assert!(env.mobile_wp.join("mob_2400.webp").exists());
+    assert!(env.mobile_wp.join("mob_2532.PNG").exists());
+    assert!(!env.source.join("mob_2400.webp").exists());
+    assert!(!env.source.join("mob_2532.PNG").exists());
+
+    assert!(env.source.join("square_1000.png").exists());
+    assert!(env.source.join("boundary_1_2.png").exists());
+    assert!(env.source.join("boundary_0_8.png").exists());
+    assert!(env.source.join("lowres_800x600.jpg").exists());
+    assert!(env.source.join("corrupt.png").exists());
+
+    assert!(env.source.join("collide.png").exists());
+    assert_eq!(
+        fs::read(env.desktop_wp.join("collide.png")).unwrap(),
+        b"existing-desktop-wallpaper"
+    );
+    assert!(live_out.to_lowercase().contains("warn"));
+}
+
+#[cfg(unix)]
+fn set_executable(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let mut perms = fs::metadata(path).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(path, perms).unwrap();
+}
+
+fn create_tar_gz(archive_path: &Path, base_dir: &Path, items: &[&str]) {
+    let status = std::process::Command::new("tar")
+        .arg("-czf")
+        .arg(archive_path)
+        .arg("-C")
+        .arg(base_dir)
+        .args(items)
+        .status()
+        .expect("tar command should run");
+    assert!(status.success(), "tar creation failed");
+}
+
+#[test]
+fn extracts_app_tarballs_creates_desktop_and_symlink_trashes_archive_and_skips_non_apps() {
+    let env = TestEnv::new("app_tarball");
+    let build_dir = env.root.join("build_tar");
+    fs::create_dir_all(&build_dir).unwrap();
+
+    let discord_stage = build_dir.join("Discord");
+    fs::create_dir_all(&discord_stage).unwrap();
+    let discord_bin = discord_stage.join("Discord");
+    fs::write(&discord_bin, b"\x7fELF-discord-v1").unwrap();
+    set_executable(&discord_bin);
+    fs::write(discord_stage.join("discord.png"), make_png_header(256, 256)).unwrap();
+    let discord_tar = env.source.join("discord-0.0.28.tar.gz");
+    create_tar_gz(&discord_tar, &build_dir, &["Discord"]);
+
+    let postman_stage = build_dir.join("postman_flat");
+    fs::create_dir_all(&postman_stage).unwrap();
+    let postman_sh = postman_stage.join("postman.sh");
+    fs::write(&postman_sh, b"#!/usr/bin/env sh\necho postman\n").unwrap();
+    set_executable(&postman_sh);
+    let postman_tar = env.source.join("postman-linux-x64.tgz");
+    create_tar_gz(&postman_tar, &postman_stage, &["postman.sh"]);
+
+    let docs_stage = build_dir.join("docs_only");
+    fs::create_dir_all(&docs_stage).unwrap();
+    fs::write(docs_stage.join("README.md"), b"# Documentation\n").unwrap();
+    fs::write(docs_stage.join("notes.txt"), b"plain text\n").unwrap();
+    let docs_tar = env.source.join("project-docs-1.0.tar.gz");
+    create_tar_gz(&docs_tar, &docs_stage, &["README.md", "notes.txt"]);
+
+    let dry_out = downsort::run_cli([
+        "--config",
+        env.config_path.to_str().unwrap(),
+        "--dry-run",
+    ])
+    .expect("dry-run should succeed");
+    assert!(dry_out.contains("discord"), "dry-run should preview discord app: {dry_out}");
+    assert!(dry_out.contains("Discord"), "dry-run should preview binary path: {dry_out}");
+    assert!(dry_out.contains("discord.png"), "dry-run should preview icon path: {dry_out}");
+    assert!(dry_out.contains("discord.desktop"), "dry-run should preview desktop path: {dry_out}");
+    assert!(!env.apps.exists());
+    assert!(!env.launchers.exists());
+    assert!(!env.bin_dir.exists());
+    assert!(discord_tar.exists());
+    assert!(postman_tar.exists());
+    assert!(docs_tar.exists());
+
+    let live_out = downsort::run_cli(["--config", env.config_path.to_str().unwrap()])
+        .expect("live run should succeed");
+    assert!(live_out.contains("discord"));
+
+    let installed_discord_bin = env.apps.join("discord").join("Discord");
+    let installed_discord_icon = env.apps.join("discord").join("discord.png");
+    assert!(installed_discord_bin.exists(), "Discord binary should be extracted");
+    assert!(installed_discord_icon.exists(), "Discord icon should be extracted");
+
+    let discord_desktop = env.launchers.join("discord.desktop");
+    assert!(discord_desktop.exists(), "discord.desktop should be created");
+    let desktop_text = fs::read_to_string(&discord_desktop).unwrap();
+    assert!(desktop_text.contains("[Desktop Entry]"));
+    assert!(desktop_text.contains("Type=Application"));
+    assert!(desktop_text.contains("Name=Discord"));
+    assert!(desktop_text.contains(&format!("Exec={}", installed_discord_bin.display())));
+    assert!(desktop_text.contains(&format!("Icon={}", installed_discord_icon.display())));
+    assert!(desktop_text.contains("Categories=Utility;Application;"));
+
+    let discord_link = env.bin_dir.join("discord");
+    assert!(discord_link.exists(), "symlink in bin_dir should exist");
+    assert_eq!(fs::read_link(&discord_link).unwrap(), installed_discord_bin);
+
+    let postman_desktop = env.launchers.join("postman.desktop");
+    assert!(postman_desktop.exists());
+    let postman_text = fs::read_to_string(&postman_desktop).unwrap();
+    assert!(postman_text.contains("Icon=application-x-executable"));
+    assert!(env.bin_dir.join("postman").exists());
+
+    assert!(!discord_tar.exists(), "discord archive should be moved out of downloads");
+    assert!(!postman_tar.exists(), "postman archive should be moved out of downloads");
+    let trash_files = env.root.join("Trash").join("files");
+    assert!(trash_files.join("discord-0.0.28.tar.gz").exists(), "discord archive should be in Trash");
+    assert!(trash_files.join("postman-linux-x64.tgz").exists(), "postman archive should be in Trash");
+
+    assert!(docs_tar.exists(), "non-app tarball must remain in downloads");
+
+    fs::write(&discord_bin, b"\x7fELF-discord-v2-upgraded").unwrap();
+    set_executable(&discord_bin);
+    let discord_tar_v2 = env.source.join("discord-0.0.29.tar.gz");
+    create_tar_gz(&discord_tar_v2, &build_dir, &["Discord"]);
+
+    downsort::run_cli(["--config", env.config_path.to_str().unwrap()])
+        .expect("upgrade run should succeed");
+    assert_eq!(
+        fs::read(&installed_discord_bin).unwrap(),
+        b"\x7fELF-discord-v2-upgraded",
+        "existing app should be upgraded in place"
+    );
+    assert!(!discord_tar_v2.exists());
+}
+
+#[test]
+fn detects_elf_without_exec_bit_and_rejects_path_traversal_tarball() {
+    let env = TestEnv::new("elf_and_traversal");
+    let build_dir = env.root.join("build_tar");
+    fs::create_dir_all(&build_dir).unwrap();
+
+    let elf_stage = build_dir.join("neovim");
+    fs::create_dir_all(&elf_stage).unwrap();
+    let elf_bin = elf_stage.join("nvim");
+    fs::write(&elf_bin, b"\x7fELF\x02\x01\x01\x00-neovim-binary").unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&elf_bin).unwrap().permissions();
+        perms.set_mode(0o644);
+        fs::set_permissions(&elf_bin, perms).unwrap();
+    }
+    let nvim_tar = env.source.join("nvim-linux64.tar.gz");
+    create_tar_gz(&nvim_tar, &build_dir, &["neovim"]);
+
+    let evil_dir = build_dir.join("evil_sub");
+    fs::create_dir_all(&evil_dir).unwrap();
+    let outside_evil = build_dir.join("escaped.sh");
+    fs::write(&outside_evil, b"#!/bin/sh\necho pwned\n").unwrap();
+    set_executable(&outside_evil);
+    let evil_tar = env.source.join("evil-1.0.tar.gz");
+    let status = std::process::Command::new("tar")
+        .arg("-P")
+        .arg("-czf")
+        .arg(&evil_tar)
+        .arg("-C")
+        .arg(&evil_dir)
+        .arg("../escaped.sh")
+        .status()
+        .expect("tar should build traversal archive");
+    assert!(status.success());
+
+    let out = downsort::run_cli(["--config", env.config_path.to_str().unwrap()])
+        .expect("CLI should succeed and isolate bad archive");
+
+    let installed_nvim = env.apps.join("nvim").join("nvim");
+    assert!(
+        installed_nvim.exists(),
+        "ELF binary without +x bit in tar should still be detected and installed: {out}"
+    );
+    assert!(env.launchers.join("nvim.desktop").exists());
+    assert!(env.bin_dir.join("nvim").exists());
+
+    assert!(evil_tar.exists(), "rejected traversal archive should remain in downloads");
+    assert!(!env.apps.join("evil").exists());
+    assert!(!env.root.join("escaped.sh").exists());
+    assert!(out.to_lowercase().contains("warn"));
+}
+
+#[test]
+fn end_to_end_mixed_batch_via_cli_binary_dry_run_and_live() {
+    let env = TestEnv::new("e2e_pipeline");
+    let build_dir = env.root.join("build_tar");
+    fs::create_dir_all(&build_dir).unwrap();
+
+    let anime_file = "[SubsPlease] Solo Leveling - 05 [1080p].mkv";
+    fs::write(env.source.join(anime_file), b"anime-data").unwrap();
+    fs::write(env.source.join("home_video.mp4"), b"personal-video").unwrap();
+    fs::write(env.source.join("desktop_bg.png"), make_png_header(3840, 2160)).unwrap();
+    fs::write(env.source.join("phone_bg.jpg"), make_jpeg_header(1080, 2400)).unwrap();
+    fs::write(env.source.join("avatar.png"), make_png_header(512, 512)).unwrap();
+    fs::write(env.source.join("broken_img.webp"), b"corrupt-webp-bytes").unwrap();
+    fs::write(env.source.join("unfinished.mkv.crdownload"), b"partial").unwrap();
+    fs::write(env.source.join("broken_archive.tar.gz"), b"not-a-valid-gzip").unwrap();
+
+    let app_stage = build_dir.join("wezterm");
+    fs::create_dir_all(&app_stage).unwrap();
+    let app_bin = app_stage.join("wezterm");
+    fs::write(&app_bin, b"\x7fELF-wezterm").unwrap();
+    set_executable(&app_bin);
+    create_tar_gz(&env.source.join("wezterm-2026.tar.gz"), &build_dir, &["wezterm"]);
+
+    let src_stage = build_dir.join("src_code");
+    fs::create_dir_all(&src_stage).unwrap();
+    fs::write(src_stage.join("main.c"), b"int main() { return 0; }\n").unwrap();
+    create_tar_gz(&env.source.join("source-code-1.0.tar.gz"), &src_stage, &["main.c"]);
+
+    let snapshot_before = snapshot_dir(&env.source);
+
+    let exe = env!("CARGO_BIN_EXE_downsort");
+    let dry_cmd = std::process::Command::new(exe)
+        .args(["--config", env.config_path.to_str().unwrap(), "--dry-run"])
+        .output()
+        .expect("downsort binary should run");
+    assert!(dry_cmd.status.success(), "dry-run should exit 0");
+
+    let snapshot_after_dry = snapshot_dir(&env.source);
+    assert_eq!(snapshot_before, snapshot_after_dry, "dry-run must not modify any files");
+    assert!(!env.anime.exists());
+    assert!(!env.desktop_wp.exists());
+    assert!(!env.mobile_wp.exists());
+    assert!(!env.apps.exists());
+
+    let live_cmd = std::process::Command::new(exe)
+        .args(["--config", env.config_path.to_str().unwrap()])
+        .output()
+        .expect("downsort binary should run");
+    assert!(live_cmd.status.success(), "live run should exit 0 even with per-file errors");
+    let stdout = String::from_utf8_lossy(&live_cmd.stdout);
+
+    assert!(stdout.contains("Total files scanned: 10"), "stdout: {stdout}");
+    assert!(stdout.contains("Anime videos moved: 1"), "stdout: {stdout}");
+    assert!(stdout.contains("Solo Leveling: 1"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("Wallpapers organized: 2 (Desktop: 1, Mobile: 1)"),
+        "stdout: {stdout}"
+    );
+    assert!(stdout.contains("Applications installed / updated: 1"), "stdout: {stdout}");
+    assert!(stdout.contains("Files skipped: 6"), "stdout: {stdout}");
+
+    assert!(env.anime.join("Solo Leveling").join(anime_file).exists());
+    assert!(env.desktop_wp.join("desktop_bg.png").exists());
+    assert!(env.mobile_wp.join("phone_bg.jpg").exists());
+    assert!(env.apps.join("wezterm").join("wezterm").exists());
+    assert!(env.launchers.join("wezterm.desktop").exists());
+    assert!(env.bin_dir.join("wezterm").exists());
+    assert!(env.root.join("Trash").join("files").join("wezterm-2026.tar.gz").exists());
+
+    assert!(env.source.join("home_video.mp4").exists());
+    assert!(env.source.join("avatar.png").exists());
+    assert!(env.source.join("broken_img.webp").exists());
+    assert!(env.source.join("unfinished.mkv.crdownload").exists());
+    assert!(env.source.join("broken_archive.tar.gz").exists());
+    assert!(env.source.join("source-code-1.0.tar.gz").exists());
+}
